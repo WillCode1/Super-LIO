@@ -7,6 +7,8 @@
 #include <tbb/concurrent_vector.h>
 #include <tbb/enumerable_thread_specific.h>
 
+FILE *location_log = nullptr;
+Backend backend;
 
 using namespace BASIC;
 
@@ -66,6 +68,7 @@ void SuperLIO::init(){
   ivox_.reset(new OctVoxMapType(OctVoxMapType::Options{g_ivox_resolution, g_ivox_capacity}));
   kf_.reset(new ESKF());
   data_wrapper_->setESKF(kf_);
+  data_wrapper_->load_backend_param(backend);
   
   scan_undistort_full_.reset(new PointCloudType());
   ds_undistort_.reset(new PointCloudType());
@@ -197,12 +200,14 @@ void SuperLIO::stateProcess(){
     time_record_.Evaluate([this](){Propagation_Undistort();}, "[Undistort]");
     time_record_.Evaluate([this]() { DownSample(); }, "[DownSample]");
     time_record_.Evaluate([this]() { Observe(); }, "[Observe]");
-    time_record_.Evaluate([this]() { UpdateMap(); }, "[UpdateMap]");
+    if (!RunBackend())
+      time_record_.Evaluate([this]() { UpdateMap(); }, "[UpdateMap]");
   }else{
     Propagation_Undistort();
     DownSample();
     Observe();
-    UpdateMap();
+    if (!RunBackend())
+      UpdateMap();
   }
   Output();
   caceData();
@@ -536,6 +541,59 @@ void SuperLIO::Observe(){
   frame_num_++;
 }
 
+bool SuperLIO::RunBackend(){
+  PointCloudType::Ptr submap_fix(new PointCloudType());
+  PointXYZIRPYT this_pose6d;
+
+  last_pose_ = kf_->GetSE3();
+  auto R = last_pose_.R_;
+  auto t = last_pose_.t_;
+  Eigen::Vector3f eulerAngle = EigenMath::RotationMatrix2RPY(R);
+  this_pose6d.x = t(0);      // x
+  this_pose6d.y = t(1);      // y
+  this_pose6d.z = t(2);      // z
+  this_pose6d.roll = eulerAngle(0);  // roll
+  this_pose6d.pitch = eulerAngle(1); // pitch
+  this_pose6d.yaw = eulerAngle(2);   // yaw
+  this_pose6d.time = measures_.lidar.end_time;
+
+  if (backend.backend->update_height)
+    backend.backend->cur_height = this_pose6d.z;
+  backend.run(this_pose6d, scan_undistort_full_, submap_fix);
+  if (submap_fix->size())
+  {
+    t = V3F(this_pose6d.x, this_pose6d.y, this_pose6d.z);
+    eulerAngle = V3F(this_pose6d.roll, this_pose6d.pitch, this_pose6d.yaw);
+    R = EigenMath::RPY2RotationMatrix(eulerAngle);
+    auto state = kf_->GetSysState();
+    auto dR = state.R.R_.inverse() * R;
+    state.R = SO3(R);
+    state.p = t;
+    state.v = dR * state.v;
+    kf_->SetX(state);
+    // frontend.ikdtree.reconstruct(submap_fix->points);
+
+    std::size_t ptsize = submap_fix->size();
+    points_world_v3_.resize(ptsize);
+
+    tbb::parallel_for(
+        tbb::blocked_range<size_t>(0, ptsize),
+        [&](const tbb::blocked_range<size_t> &r)
+        {
+          for (size_t idx = r.begin(); idx < r.end(); ++idx)
+          {
+            auto &point_pcl = submap_fix->points[idx];
+            V3 point_body(point_pcl.x, point_pcl.y, point_pcl.z);
+            points_world_v3_[idx] = point_body;
+          }
+        });
+
+    ivox_->clear();
+    ivox_->insert(points_world_v3_);
+    return true;
+  }
+  return false;
+}
 
 void SuperLIO::UpdateMap() {
   const size_t ptsize = ds_undistort_->size();
@@ -582,6 +640,9 @@ void SuperLIO::Output(){
       data_wrapper_->pub_cloud_world(world_pc, state.timestamp);
     }
   }
+  data_wrapper_->PublishKeyframeTrajectory(data_wrapper_->pub_path2_, *backend.keyframe_pose6d_optimized);
+  data_wrapper_->VisualizeLoopClosureConstraints(data_wrapper_->pub_loopConstraint_edge_, backend.loopClosure->loop_constraint_records,
+                                                 backend.loopClosure->copy_keyframe_pose6d);
 }
 
 void SuperLIO::printTimeRecord(){

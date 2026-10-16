@@ -41,6 +41,7 @@
 #include "lio/ESKF.h"
 #include "OctVoxMap/OctVoxMap.hpp"
 
+#include "backend/backend/Backend.h"
 
 namespace LI2Sup{
 
@@ -76,9 +77,18 @@ public:
                             const NavState& state);  
   void pub_processing_time(double time, double current_time, double mean_time, double std_time);
 
+  void PublishKeyframeTrajectory(rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr &pubPath,
+                                 const pcl::PointCloud<PointXYZIRPYT> &trajectory);
+
+  void VisualizeLoopClosureConstraints(rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr &pubLoopConstraintEdge,
+                                       const unordered_map<int, int> &loop_constraint_records,
+                                       const pcl::PointCloud<PointXYZIRPYT>::Ptr keyframe_pose6d);
+
   void set_global_map(const BASIC::CloudPtr& global_map);
 
   void set_initial_data(BASIC::SE3& init_pose, bool& flg_get_init_guess, bool flg_finish_init = false);
+
+  void load_backend_param(Backend& backend);
 
   rclcpp::CallbackGroup::SharedPtr getSensorCallbackGroup() {
     return cb_sensor_;
@@ -120,6 +130,10 @@ private:
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_robo_odom_;  /// IMU fre   --> Robot frame
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_path_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_cloud_world_;
+
+public:
+  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_path2_;
+  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pub_loopConstraint_edge_;
 };
 
 } // namespace END.

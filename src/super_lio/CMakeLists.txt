@@ -10,6 +10,7 @@ set(CMAKE_BUILD_TYPE "Release")
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -pthread -fexceptions -flto=auto")
 set(CMAKE_C_FLAGS_RELEASE "-O3 -Wall -fPIC")
 add_definitions(-DROOT=\"${CMAKE_CURRENT_SOURCE_DIR}/\")
+# set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread -fexceptions -O0 -g -fsanitize=address")
 
 
 find_package(ament_cmake REQUIRED)
@@ -26,6 +27,7 @@ find_package(livox_ros_driver2 REQUIRED)
 
 find_package(Eigen3 REQUIRED NO_MODULE)
 find_package(PCL REQUIRED)
+find_package(GTSAM REQUIRED)
 find_package(Glog REQUIRED)
 find_package(basic REQUIRED)
 
@@ -47,13 +49,24 @@ include_directories(
   3rdparty
   ${EIGEN3_INCLUDE_DIRS}
   ${PCL_INCLUDE_DIRS}
+  ${GTSAM_INCLUDE_DIR}
   ${Glog_INCLUDE_DIRS}
 )
+
+set(BACKEND_SOURCES
+  include/backend/backend/Backend.cpp
+  include/backend/backend/FactorGraphOptimization.cpp
+  include/backend/backend/GnssProcessor.cpp
+  include/backend/backend/LoopClosure.cpp
+  include/backend/backend/Relocalization.cpp
+  include/backend/utility/Pcd2Pgm.cpp
+  include/backend/global_localization/scancontext/Scancontext.cpp
+  include/backend/global_localization/InitCoordinate.cpp)
 
 file(GLOB_RECURSE LIO_LIB_SRC "src/lio/*.cpp" "src/ros/*.cpp")
 file(GLOB_RECURSE LIO_LIB_HEADERS "include/lio/*.hpp" "include/lio/*.h")
 
-add_library(lio ${LIO_LIB_SRC} ${LIO_LIB_HEADERS})
+add_library(lio ${LIO_LIB_SRC} ${LIO_LIB_HEADERS} ${BACKEND_SOURCES})
 
 ament_target_dependencies(lio PUBLIC
   rclcpp
@@ -71,6 +84,8 @@ ament_target_dependencies(lio PUBLIC
 target_link_libraries(lio PUBLIC
   Eigen3::Eigen
   ${PCL_LIBRARIES}
+  gtsam
+  stdc++fs
   glog
   pthread
   ${cpp_typesupport_target}
@@ -88,6 +103,9 @@ target_link_libraries(relocation_node
   ${cpp_typesupport_target}
 )
 
+add_executable(status_switch src/apps/status_switch.cpp)
+ament_target_dependencies(status_switch rclcpp std_msgs)
+
 install(TARGETS
   lio
   ARCHIVE DESTINATION lib
@@ -95,7 +113,7 @@ install(TARGETS
 )
 
 install(TARGETS
-  super_lio_node
+  super_lio_node status_switch
   DESTINATION lib/${PROJECT_NAME}
 )
 

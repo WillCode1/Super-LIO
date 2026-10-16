@@ -1,7 +1,81 @@
 
 #include "ros/ROSWrapper.h"
 #include "geometry_msgs/msg/pose_with_covariance_stamped.hpp"
+#include "std_msgs/msg/string.hpp"
 
+bool showOptimizedPose = true;
+double globalMapVisualizationSearchRadius = 1000;
+double globalMapVisualizationPoseDensity = 10;
+double globalMapVisualizationLeafSize = 1;
+std::thread visualizeMapThread;
+extern Backend backend;
+rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubGlobalmap;
+rclcpp::Subscription<std_msgs::msg::String>::SharedPtr key_sub;
+
+void publish_cloud(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr &pubCloud,
+                   PointCloudType::Ptr cloud, const std::string &frame_id)
+{
+  sensor_msgs::msg::PointCloud2 cloud_msg;
+  pcl::toROSMsg(*cloud, cloud_msg);
+  cloud_msg.header.stamp = rclcpp::Clock().now();
+  cloud_msg.header.frame_id = frame_id;
+  pubCloud->publish(cloud_msg);
+}
+
+void visualize_globalmap_thread(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubGlobalmap)
+{
+  while (rclcpp::ok())
+  {
+    this_thread::sleep_for(std::chrono::seconds(1));
+    auto submap_visual = backend.get_submap_visual(globalMapVisualizationSearchRadius,
+                                                   globalMapVisualizationPoseDensity,
+                                                   globalMapVisualizationLeafSize,
+                                                   showOptimizedPose);
+    if (submap_visual == nullptr)
+      continue;
+    publish_cloud(pubGlobalmap, submap_visual, "world");
+  }
+}
+
+void keyCallback(const std_msgs::msg::String::ConstPtr &msg)
+{
+  if (msg->data.empty())
+    return;
+
+  char key = msg->data[0];
+
+  switch (key)
+  {
+  case 'z':
+    if (!backend.backend->z_axis_constraint_enable)
+    {
+      backend.backend->z_axis_constraint_enable = true;
+      backend.backend->update_height = true;
+      LOG_WARN("backend.backend->z_axis_constraint_enable = true");
+    }
+    else
+    {
+      backend.backend->z_axis_constraint_enable = false;
+      backend.backend->update_height = true;
+      LOG_WARN("backend.backend->z_axis_constraint_enable = false");
+    }
+    break;
+  case 's':
+    if (!backend.backend->update_height)
+    {
+      backend.backend->update_height = true;
+      LOG_WARN("backend.backend->update_height = true");
+    }
+    else
+    {
+      backend.backend->update_height = false;
+      LOG_WARN("backend.backend->update_height = false");
+    }
+    break;
+  default:
+    break;
+  }
+}
 
 using namespace BASIC;
 
@@ -341,6 +415,12 @@ void ROSWrapper::setupIO(){
 
   tf_broadcaster_ =
       std::make_shared<tf2_ros::TransformBroadcaster>(this);
+
+  pub_path2_ = this->create_publisher<nav_msgs::msg::Path>("/path", 10);
+  pub_loopConstraint_edge_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("/loop_constraint_edge", 10);
+  pubGlobalmap = this->create_publisher<sensor_msgs::msg::PointCloud2>("/map_global", 1);
+  visualizeMapThread = std::thread(&visualize_globalmap_thread, pubGlobalmap);
+  key_sub = this->create_subscription<std_msgs::msg::String>("/key_input", 10, keyCallback);
 }
 
 
@@ -719,6 +799,94 @@ void ROSWrapper::pub_processing_time(double time,
   pub_processing_time_->publish(msg);
 }
 
+void ROSWrapper::PublishKeyframeTrajectory(rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr &pubPath,
+                                           const pcl::PointCloud<PointXYZIRPYT> &trajectory)
+{
+  nav_msgs::msg::Path path;
+  path.header.stamp = rclcpp::Clock().now();
+  path.header.frame_id = "world";
+
+  geometry_msgs::msg::PoseStamped msg_lidar_pose;
+  for (const auto &point : trajectory)
+  {
+    msg_lidar_pose.pose.position.x = point.x;
+    msg_lidar_pose.pose.position.y = point.y;
+    msg_lidar_pose.pose.position.z = point.z;
+    auto quat = EigenMath::RPY2Quaternion(V3D(point.roll, point.pitch, point.yaw));
+    msg_lidar_pose.pose.orientation.x = quat.x();
+    msg_lidar_pose.pose.orientation.y = quat.y();
+    msg_lidar_pose.pose.orientation.z = quat.z();
+    msg_lidar_pose.pose.orientation.w = quat.w();
+
+    msg_lidar_pose.header.stamp = rclcpp::Clock().now();
+    msg_lidar_pose.header.frame_id = "world";
+
+    path.poses.push_back(msg_lidar_pose);
+  }
+
+  pubPath->publish(path);
+}
+
+void ROSWrapper::VisualizeLoopClosureConstraints(rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr &pubLoopConstraintEdge,
+                                                 const unordered_map<int, int> &loop_constraint_records,
+                                                 const pcl::PointCloud<PointXYZIRPYT>::Ptr keyframe_pose6d)
+{
+  if (loop_constraint_records.empty())
+    return;
+
+  visualization_msgs::msg::MarkerArray markerArray;
+  // loop nodes
+  visualization_msgs::msg::Marker markerNode;
+  markerNode.header.frame_id = "world";
+  markerNode.header.stamp = rclcpp::Clock().now();
+  markerNode.action = visualization_msgs::msg::Marker::ADD;
+  markerNode.type = visualization_msgs::msg::Marker::SPHERE_LIST;
+  markerNode.ns = "loop_nodes";
+  markerNode.id = 0;
+  markerNode.pose.orientation.w = 1;
+  markerNode.scale.x = 0.3;
+  markerNode.scale.y = 0.3;
+  markerNode.scale.z = 0.3;
+  markerNode.color.r = 0;
+  markerNode.color.g = 0.8;
+  markerNode.color.b = 1;
+  markerNode.color.a = 1;
+  // loop edges
+  visualization_msgs::msg::Marker markerEdge;
+  markerEdge.header.frame_id = "world";
+  markerEdge.header.stamp = rclcpp::Clock().now();
+  markerEdge.action = visualization_msgs::msg::Marker::ADD;
+  markerEdge.type = visualization_msgs::msg::Marker::LINE_LIST;
+  markerEdge.ns = "loop_edges";
+  markerEdge.id = 1;
+  markerEdge.pose.orientation.w = 1;
+  markerEdge.scale.x = 0.1;
+  markerEdge.color.r = 0.9;
+  markerEdge.color.g = 0.9;
+  markerEdge.color.b = 0;
+  markerEdge.color.a = 1;
+
+  for (auto it = loop_constraint_records.begin(); it != loop_constraint_records.end(); ++it)
+  {
+    int key_cur = it->first;
+    int key_pre = it->second;
+    geometry_msgs::msg::Point p;
+    p.x = keyframe_pose6d->points[key_cur].x;
+    p.y = keyframe_pose6d->points[key_cur].y;
+    p.z = keyframe_pose6d->points[key_cur].z;
+    markerNode.points.push_back(p);
+    markerEdge.points.push_back(p);
+    p.x = keyframe_pose6d->points[key_pre].x;
+    p.y = keyframe_pose6d->points[key_pre].y;
+    p.z = keyframe_pose6d->points[key_pre].z;
+    markerNode.points.push_back(p);
+    markerEdge.points.push_back(p);
+  }
+
+  markerArray.markers.push_back(markerNode);
+  markerArray.markers.push_back(markerEdge);
+  pubLoopConstraintEdge->publish(markerArray);
+}
 
 void ROSWrapper::set_global_map(const BASIC::CloudPtr& global_map){
   pcl::toROSMsg(*global_map, global_map_msg_);
@@ -790,5 +958,127 @@ void ROSWrapper::set_initial_data(BASIC::SE3& init_pose, bool& flg_get_init_gues
   }
 }
 
+void ROSWrapper::load_backend_param(Backend &backend)
+{
+  vector<double> extrinT;
+  vector<double> extrinR;
+  V3D extrinT_eigen;
+  M3D extrinR_eigen;
+
+  this->declare_parameter("backend.keyframe_add_dist_threshold", 1.f);
+  this->declare_parameter("backend.keyframe_add_angle_threshold", 0.2f);
+  this->declare_parameter("backend.numsv", 20);
+  this->declare_parameter("backend.rtk_age", 30.f);
+  this->declare_parameter("backend.gpsCovThreshold", vector<double>());
+  this->declare_parameter("backend.pose_cov_threshold", 25.f);
+  this->declare_parameter("backend.gnss_weight", vector<double>());
+  this->declare_parameter("backend.gnssValidInterval", 0.2f);
+  this->declare_parameter("backend.useGpsElevation", false);
+  this->declare_parameter("backend.extrinsic_gnss_T", vector<double>());
+  this->declare_parameter("backend.extrinsic_gnss_R", vector<double>());
+  this->declare_parameter("backend.recontruct_kdtree", true);
+  this->declare_parameter("backend.ikdtree_reconstruct_keyframe_num", 10);
+  this->declare_parameter("backend.ikdtree_reconstruct_downsamp_size", 0.1f);
+  this->declare_parameter("backend.loop_closure_enable_flag", false);
+  this->declare_parameter("backend.loop_closure_interval", 1000);
+  this->declare_parameter("backend.loop_keyframe_num_thld", 50);
+  this->declare_parameter("backend.loop_closure_search_radius", 10.f);
+  this->declare_parameter("backend.loop_closure_keyframe_interval", 30);
+  this->declare_parameter("backend.keyframe_search_num", 20);
+  this->declare_parameter("backend.loop_closure_fitness_use_adaptability", false);
+  this->declare_parameter("backend.loop_closure_fitness_score_thld_min", 0.1);
+  this->declare_parameter("backend.loop_closure_fitness_score_thld_max", 0.3);
+  this->declare_parameter("backend.icp_downsamp_size", 0.1);
+  this->declare_parameter("backend.manually_loop_vaild_period", vector<double>());
+  this->declare_parameter("backend.odom_loop_vaild_period", vector<double>());
+  this->declare_parameter("backend.scancontext_loop_vaild_period", vector<double>());
+  this->declare_parameter("official.save_globalmap_en", true);
+  this->declare_parameter("official.save_pgm", false);
+  this->declare_parameter("official.pgm_resolution", 0.05);
+  this->declare_parameter("official.min_z", -1.5f);
+  this->declare_parameter("official.max_z", 0.1f);
+  this->declare_parameter("official.save_keyframe_en", true);
+  this->declare_parameter("official.save_keyframe_descriptor_en", true);
+  this->declare_parameter("official.save_resolution", 0.1f);
+  this->declare_parameter("official.map_path", "");
+  this->declare_parameter("scan_context.lidar_height", 2.0);
+  this->declare_parameter("scan_context.sc_dist_thres", 0.5);
+
+  this->get_parameter("backend.keyframe_add_dist_threshold", backend.backend->keyframe_add_dist_threshold);
+  this->get_parameter("backend.keyframe_add_angle_threshold", backend.backend->keyframe_add_angle_threshold);
+  this->get_parameter("backend.numsv", backend.gnss->numsv);
+  this->get_parameter("backend.rtk_age", backend.gnss->rtk_age);
+  this->get_parameter("backend.gpsCovThreshold", backend.gnss->gpsCovThreshold);
+  this->get_parameter("backend.pose_cov_threshold", backend.backend->pose_cov_threshold);
+  this->get_parameter("backend.gnss_weight", backend.backend->gnss_weight);
+  this->get_parameter("backend.gnssValidInterval", backend.gnss->gnssValidInterval);
+  this->get_parameter("backend.useGpsElevation", backend.gnss->useGpsElevation);
+
+  this->get_parameter("backend.extrinsic_gnss_T", extrinT);
+  this->get_parameter("backend.extrinsic_gnss_R", extrinR);
+  extrinT_eigen << VEC_FROM_ARRAY(extrinT);
+  extrinR_eigen << MAT_FROM_ARRAY(extrinR);
+  backend.gnss->set_extrinsic(extrinT_eigen, extrinR_eigen);
+
+  this->get_parameter("backend.recontruct_kdtree", backend.backend->recontruct_kdtree);
+  this->get_parameter("backend.ikdtree_reconstruct_keyframe_num", backend.backend->ikdtree_reconstruct_keyframe_num);
+  this->get_parameter("backend.ikdtree_reconstruct_downsamp_size", backend.backend->ikdtree_reconstruct_downsamp_size);
+
+  this->get_parameter("backend.loop_closure_enable_flag", backend.loop_closure_enable_flag);
+  this->get_parameter("backend.loop_closure_interval", backend.loop_closure_interval);
+  this->get_parameter("backend.loop_keyframe_num_thld", backend.loopClosure->loop_keyframe_num_thld);
+  this->get_parameter("backend.loop_closure_search_radius", backend.loopClosure->loop_closure_search_radius);
+  this->get_parameter("backend.loop_closure_keyframe_interval", backend.loopClosure->loop_closure_keyframe_interval);
+  this->get_parameter("backend.keyframe_search_num", backend.loopClosure->keyframe_search_num);
+  this->get_parameter("backend.loop_closure_fitness_use_adaptability", backend.loopClosure->loop_closure_fitness_use_adaptability);
+  this->get_parameter("backend.loop_closure_fitness_score_thld_min", backend.loopClosure->loop_closure_fitness_score_thld_min);
+  this->get_parameter("backend.loop_closure_fitness_score_thld_max", backend.loopClosure->loop_closure_fitness_score_thld_max);
+  this->get_parameter("backend.icp_downsamp_size", backend.loopClosure->icp_downsamp_size);
+  this->get_parameter("backend.manually_loop_vaild_period", backend.loopClosure->loop_vaild_period["manually"]);
+  this->get_parameter("backend.odom_loop_vaild_period", backend.loopClosure->loop_vaild_period["odom"]);
+  this->get_parameter("backend.scancontext_loop_vaild_period", backend.loopClosure->loop_vaild_period["scancontext"]);
+
+  this->declare_parameter("backend.gtsam_ground_constraint_enable", false);
+  this->declare_parameter("backend.update_height", true);
+  this->declare_parameter("backend.add_height_factor_threshold", 0.1);
+  this->declare_parameter("backend.loop_closure_height_thld", 20.f);
+  this->get_parameter("backend.gtsam_ground_constraint_enable", backend.backend->z_axis_constraint_enable);
+  this->get_parameter("backend.update_height", backend.backend->update_height);
+  this->get_parameter("backend.add_height_factor_threshold", backend.backend->add_height_factor_threshold);
+  this->get_parameter("backend.loop_closure_height_thld", backend.loopClosure->loop_closure_height_thld);
+
+  // this->get_parameter("official.save_globalmap_en", save_globalmap_en);
+  // this->get_parameter("official.save_pgm", save_pgm);
+  // this->get_parameter("official.pgm_resolution", pgm_resolution);
+  // this->get_parameter("official.min_z", min_z);
+  // this->get_parameter("official.max_z", max_z);
+  this->get_parameter("official.save_keyframe_en", backend.save_keyframe_en);
+  this->get_parameter("official.save_keyframe_descriptor_en", backend.save_keyframe_descriptor_en);
+  this->get_parameter("official.save_resolution", backend.save_resolution);
+  this->get_parameter("official.map_path", backend.map_path);
+  if (backend.map_path.compare("") != 0)
+  {
+    backend.globalmap_path = backend.map_path + "/globalmap.pcd";
+    backend.trajectory_path = backend.map_path + "/trajectory.pcd";
+    backend.keyframe_path = backend.map_path + "/keyframe/";
+    backend.scd_path = backend.map_path + "/scancontext/";
+  }
+  else
+    backend.map_path = PCD_FILE_DIR("");
+
+  this->get_parameter("scan_context.lidar_height", backend.relocalization->sc_manager->LIDAR_HEIGHT);
+  this->get_parameter("scan_context.sc_dist_thres", backend.relocalization->sc_manager->SC_DIST_THRES);
+
+  backend.init_system_mode();
+
+  this->declare_parameter("publish.showOptimizedPose", true);
+  this->declare_parameter("publish.globalMapVisualizationSearchRadius", 1000.);
+  this->declare_parameter("publish.globalMapVisualizationPoseDensity", 10.);
+  this->declare_parameter("publish.globalMapVisualizationLeafSize", 1.);
+  this->get_parameter("publish.showOptimizedPose", showOptimizedPose);
+  this->get_parameter("publish.globalMapVisualizationSearchRadius", globalMapVisualizationSearchRadius);
+  this->get_parameter("publish.globalMapVisualizationPoseDensity", globalMapVisualizationPoseDensity);
+  this->get_parameter("publish.globalMapVisualizationLeafSize", globalMapVisualizationLeafSize);
+}
 
 } // namespace END.
