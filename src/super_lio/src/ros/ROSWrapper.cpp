@@ -9,6 +9,10 @@ double globalMapVisualizationPoseDensity = 10;
 double globalMapVisualizationLeafSize = 1;
 std::thread visualizeMapThread;
 extern Backend backend;
+bool save_globalmap_en = false;
+bool save_pgm = false;
+double pgm_resolution;
+float min_z, max_z;
 rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubGlobalmap;
 rclcpp::Subscription<std_msgs::msg::String>::SharedPtr key_sub;
 
@@ -888,6 +892,17 @@ void ROSWrapper::VisualizeLoopClosureConstraints(rclcpp::Publisher<visualization
   pubLoopConstraintEdge->publish(markerArray);
 }
 
+void ROSWrapper::saveMap() {
+  backend.save_trajectory();
+  // backend.save_factor_graph();
+
+  if (save_globalmap_en)
+    backend.save_globalmap();
+
+  if (save_pgm)
+    backend.save_pgm(pgm_resolution, min_z, max_z);
+}
+
 void ROSWrapper::set_global_map(const BASIC::CloudPtr& global_map){
   pcl::toROSMsg(*global_map, global_map_msg_);
   global_map_msg_.header.frame_id = "world";
@@ -1047,11 +1062,11 @@ void ROSWrapper::load_backend_param(Backend &backend)
   this->get_parameter("backend.add_height_factor_threshold", backend.backend->add_height_factor_threshold);
   this->get_parameter("backend.loop_closure_height_thld", backend.loopClosure->loop_closure_height_thld);
 
-  // this->get_parameter("official.save_globalmap_en", save_globalmap_en);
-  // this->get_parameter("official.save_pgm", save_pgm);
-  // this->get_parameter("official.pgm_resolution", pgm_resolution);
-  // this->get_parameter("official.min_z", min_z);
-  // this->get_parameter("official.max_z", max_z);
+  this->get_parameter("official.save_globalmap_en", save_globalmap_en);
+  this->get_parameter("official.save_pgm", save_pgm);
+  this->get_parameter("official.pgm_resolution", pgm_resolution);
+  this->get_parameter("official.min_z", min_z);
+  this->get_parameter("official.max_z", max_z);
   this->get_parameter("official.save_keyframe_en", backend.save_keyframe_en);
   this->get_parameter("official.save_keyframe_descriptor_en", backend.save_keyframe_descriptor_en);
   this->get_parameter("official.save_resolution", backend.save_resolution);
