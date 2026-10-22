@@ -17,28 +17,6 @@
 #include "backend/Header.h"
 #include "GnssProcessor.h"
 
-#define MAP_STITCH
-
-#ifdef MAP_STITCH
-struct GtsamFactor
-{
-    enum FactorType
-    {
-        Prior,
-        Between,
-        Loop,
-        Gps
-    };
-
-    bool operator<(const GtsamFactor &y) const;
-
-    FactorType factor_type;
-    int index_from;
-    int index_to;
-    gtsam::Pose3 value;
-    gtsam::Vector noise;
-};
-#endif
 
 class FactorGraphOptimization
 {
@@ -98,11 +76,6 @@ public:
     bool recontruct_kdtree = true;
     int ikdtree_reconstruct_keyframe_num = 10;
     float ikdtree_reconstruct_downsamp_size = 0.1;
-
-#ifdef MAP_STITCH
-    std::map<int, gtsam::Pose3> init_values;
-    std::queue<GtsamFactor> gtsam_factors;
-#endif
 
     bool z_axis_constraint_enable = false;
     bool update_height = true;
