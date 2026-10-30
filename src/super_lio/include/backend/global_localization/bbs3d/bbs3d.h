@@ -4,9 +4,8 @@
 #include <Eigen/Core>
 #ifdef USE_CUDA
 #include "backend/global_localization/bbs3d/gpu_bbs3d/bbs3d.cuh"
-#else
-#include "backend/global_localization/bbs3d/cpu_bbs3d/bbs3d.hpp"
 #endif
+#include "backend/global_localization/bbs3d/cpu_bbs3d/bbs3d.hpp"
 #include "backend/global_localization/bbs3d/pointcloud_iof/pcl_eigen_converter.hpp"
 // #include <pointcloud_iof/pcd_loader.hpp>
 
