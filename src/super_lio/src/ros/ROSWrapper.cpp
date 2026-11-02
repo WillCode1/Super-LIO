@@ -3,6 +3,8 @@
 #include "geometry_msgs/msg/pose_with_covariance_stamped.hpp"
 #include "std_msgs/msg/string.hpp"
 
+#include <chrono>
+
 bool showOptimizedPose = true;
 double globalMapVisualizationSearchRadius = 1000;
 double globalMapVisualizationPoseDensity = 10;
@@ -142,9 +144,6 @@ void LoadParamFromRos(rclcpp::Node& node)
   node.declare_parameter<double>("lio.sensor.gravity_norm", 9.81);
   node.get_parameter("lio.sensor.gravity_norm", g_gravity_norm);
 
-  node.declare_parameter<int>("lio.sensor.imu_type", 0);
-  node.get_parameter("lio.sensor.imu_type", g_imu_type);
-
   node.declare_parameter<double>("lio.sensor.imu_na", 0.0);
   node.get_parameter("lio.sensor.imu_na", g_imu_na);
 
@@ -208,9 +207,6 @@ void LoadParamFromRos(rclcpp::Node& node)
   node.get_parameter("lio.hash_map.vox_resolution", g_ivox_resolution);
 
   // kf
-  node.declare_parameter<int>("lio.kf.kf_type", 0);
-  node.get_parameter("lio.kf.kf_type", g_kf_type);
-
   node.declare_parameter<int>("lio.kf.kf_max_iterations", 0);
   node.get_parameter("lio.kf.kf_max_iterations", g_kf_max_iterations);
 
@@ -220,28 +216,9 @@ void LoadParamFromRos(rclcpp::Node& node)
   node.declare_parameter<double>("lio.kf.kf_quit_eps", 0.0);
   node.get_parameter("lio.kf.kf_quit_eps", g_kf_quit_eps);
 
-  // submaps
-  node.declare_parameter<double>("lio.submap.submap_resolution", 0.0);
-  node.get_parameter("lio.submap.submap_resolution", g_submap_resolution);
-
-  node.declare_parameter<int>("lio.submap.submap_capacity", 0);
-  node.get_parameter("lio.submap.submap_capacity", g_submap_capacity);
-
   // visual
   node.declare_parameter<bool>("lio.output.robot", false);
   node.get_parameter("lio.output.robot", g_2_robot);
-
-  node.declare_parameter<bool>("lio.output.planner", false);
-  node.get_parameter("lio.output.planner", g_planner_enable);
-
-  node.declare_parameter<bool>("lio.output.plan_env_world", false);
-  node.get_parameter("lio.output.plan_env_world", g_2_plan_env_world);
-
-  node.declare_parameter<bool>("lio.output.plan_env_body", false);
-  node.get_parameter("lio.output.plan_env_body", g_2_plan_env_body);
-
-  node.declare_parameter<bool>("lio.output.ml_map", false);
-  node.get_parameter("lio.output.ml_map", g_2_ml_map);
 
   node.declare_parameter<bool>("lio.output.map", false);
   node.get_parameter("lio.output.map", g_visual_map);
@@ -252,21 +229,9 @@ void LoadParamFromRos(rclcpp::Node& node)
   node.declare_parameter<int>("lio.output.pub_step", 0);
   node.get_parameter("lio.output.pub_step", g_pub_step);
 
-  // ================= relocation =================
-  node.declare_parameter<bool>("lio.relocation.update_map", false);
-  node.get_parameter("lio.relocation.update_map", g_update_map);
-
-  std::vector<double> init_pose;
-  node.declare_parameter<std::vector<double>>(
-      "lio.relocation.init_pose", std::vector<double>(6, 0.0));
-  node.get_parameter("lio.relocation.init_pose", init_pose);
-
-  g_init_px    = init_pose[0];
-  g_init_py    = init_pose[1];
-  g_init_pz    = init_pose[2];
-  g_init_roll  = init_pose[3];
-  g_init_pitch = init_pose[4];
-  g_init_yaw   = init_pose[5];
+  // ================= localization =================
+  node.declare_parameter<bool>("lio.localization.update_map", false);
+  node.get_parameter("lio.localization.update_map", g_update_map);
 
   LOG(INFO) << GREEN << " ---> [Params]: Load from ROS2 parameter server."
             << RESET;
@@ -404,6 +369,10 @@ void ROSWrapper::setupIO(){
   pub_odom_ = this->create_publisher<nav_msgs::msg::Odometry>(
       "/lio/odom", 100);
 
+  /// Same as fastlio_localization's /lidar_localization: base_link pose in world.
+  pub_lidar_localization_ = this->create_publisher<nav_msgs::msg::Odometry>(
+      "/lidar_localization", 100);
+
   pub_imu_odom_ = this->create_publisher<nav_msgs::msg::Odometry>(
       "/lio/imu/odom", 10);
 
@@ -494,6 +463,8 @@ void ROSWrapper::imuHandler(const sensor_msgs::msg::Imu::SharedPtr msg){
     odom_robo.header.stamp = msg->header.stamp;
     odom_imu.header.frame_id = "world";
     odom_robo.header.frame_id = "world";
+    odom_imu.child_frame_id = "imu";
+    odom_robo.child_frame_id = "base_link";
     pub_imu_odom_->publish(odom_imu);
     pub_robo_odom_->publish(odom_robo);
   }
@@ -668,19 +639,60 @@ void ROSWrapper::pub_odom(const NavState& state){
   odom.twist.twist.linear.y = state.v[1];
   odom.twist.twist.linear.z = state.v[2];
 
+  odom.child_frame_id = "imu";
   pub_odom_->publish(odom);    // imu frame -> lidar frequency
 
+  V3 lidar_position = state.R.R_ * ( - g_lidar_imu.R_ * g_lidar_imu.t_) + state.p;
+  M3 lidar_rotation = state.R.R_ * g_lidar_imu.R_;
+  Quat lidar_quat(lidar_rotation);
+  lidar_quat.normalize();
+
   V3 robo_position = state.R.R_ * ( - g_odom_robo.R_ * g_odom_robo.t_) + state.p;
+  M3 robo_rotation = state.R.R_ * g_odom_robo.R_;
+  Quat robo_quat(robo_rotation);
+  robo_quat.normalize();
+
+  /// Current pose in the world frame, semantic-compatible with
+  /// fastlio_localization's /lidar_localization (world -> lidar).
+  {
+    nav_msgs::msg::Odometry lidar_odom;
+    lidar_odom.header.frame_id = "world";
+    lidar_odom.child_frame_id = "lidar";
+    lidar_odom.header.stamp = odom.header.stamp;
+    lidar_odom.pose.pose.position.x = lidar_position[0];
+    lidar_odom.pose.pose.position.y = lidar_position[1];
+    lidar_odom.pose.pose.position.z = lidar_position[2];
+    lidar_odom.pose.pose.orientation.w = lidar_quat.w();
+    lidar_odom.pose.pose.orientation.x = lidar_quat.x();
+    lidar_odom.pose.pose.orientation.y = lidar_quat.y();
+    lidar_odom.pose.pose.orientation.z = lidar_quat.z();
+    pub_lidar_localization_->publish(lidar_odom);
+  }
+
+  /// Debug: echo the current world pose to the terminal at ~1 Hz.
+  if (print_pose_)
+  {
+    static auto last_print = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_print >= std::chrono::seconds(1))
+    {
+      last_print = now;
+      const M3D R_robo_d = robo_rotation.cast<double>();
+      const V3D rpy = EigenMath::RotationMatrix2RPY(R_robo_d);
+      LOG(INFO) << "[pose] world->base_link xyz=("
+                << robo_position.x() << ", " << robo_position.y() << ", " << robo_position.z()
+                << ") rpy(deg)=(" << RAD2DEG(rpy.x()) << ", " << RAD2DEG(rpy.y()) << ", "
+                << RAD2DEG(rpy.z()) << ")" << RESET;
+    }
+  }
 
   if(g_2_robot){
     static auto pub_msg2uav_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
         "/mavros/vision_pose/pose", 10);
-    M3 robo_rotation = state.R.R_ * g_odom_robo.R_;
     msg2uav_.header.stamp = odom.header.stamp;
     msg2uav_.pose.position.x = robo_position[0];
     msg2uav_.pose.position.y = robo_position[1];
     msg2uav_.pose.position.z = robo_position[2];
-    Quat robo_quat(robo_rotation);
     msg2uav_.pose.orientation.w = robo_quat.w();
     msg2uav_.pose.orientation.x = robo_quat.x();
     msg2uav_.pose.orientation.y = robo_quat.y();
@@ -694,6 +706,10 @@ void ROSWrapper::pub_odom(const NavState& state){
     geometry_msgs::msg::PoseStamped point;
     point.pose = odom.pose.pose;
     path_.poses.push_back(point);
+    if (path_.poses.size() >= 300)
+    {
+        path_.poses.erase(path_.poses.begin());
+    }
     pub_path_->publish(path_);
     last_path_point_ = robo_position;
   }
@@ -732,62 +748,6 @@ void ROSWrapper::pub_cloud_world(const CloudPtr& pc, double time){
   cloud.header.stamp = toRosTime(time);
   pub_cloud_world_->publish(cloud);
 }
-
-
-void ROSWrapper::pub_cloud2planner(const CloudPtr& pc, double time){
-  static auto pub_cloud2robot_ =
-    this->create_publisher<sensor_msgs::msg::PointCloud2>(
-        "/lio/robo/cloud_world", 10);
-  sensor_msgs::msg::PointCloud2 cloud;
-  pcl::toROSMsg(*pc, cloud);
-  cloud.header.frame_id = "world";
-  cloud.header.stamp = toRosTime(time);
-  pub_cloud2robot_->publish(cloud);
-}
-
-
-void ROSWrapper::pub_cloud_body_pose(const CloudPtr& pc, 
-  const NavState& state)
-{
-  static auto pub_cloud_body_pose_ =
-    this->create_publisher<super_lio::msg::CloudPose>(
-        "/lio/body/cloud_pose", 10);
-  super_lio::msg::CloudPose cloud_pose;
-  pcl::toROSMsg(*pc, cloud_pose.cloud);
-  cloud_pose.cloud.header.stamp = toRosTime(state.timestamp); 
-  cloud_pose.pose.position.x = state.p[0];
-  cloud_pose.pose.position.y = state.p[1];
-  cloud_pose.pose.position.z = state.p[2];
-  V4 temp_q = state.R.coeffs();
-  cloud_pose.pose.orientation.x = temp_q[0];
-  cloud_pose.pose.orientation.y = temp_q[1];
-  cloud_pose.pose.orientation.z = temp_q[2];
-  cloud_pose.pose.orientation.w = temp_q[3];
-
-  pub_cloud_body_pose_->publish(cloud_pose);
-}
-
-
-void ROSWrapper::pub_cloud_world_pose(const CloudPtr& pc, 
-   const NavState& state)
-{
-  static auto pub_cloud_world_pose_ =
-    this->create_publisher<super_lio::msg::CloudPose>(
-        "/lio/world/cloud_pose", 10);
-  super_lio::msg::CloudPose cloud_pose;
-  pcl::toROSMsg(*pc, cloud_pose.cloud);
-  cloud_pose.cloud.header.stamp = toRosTime(state.timestamp);  
-  cloud_pose.pose.position.x = state.p[0];
-  cloud_pose.pose.position.y = state.p[1];
-  cloud_pose.pose.position.z = state.p[2];
-  V4 temp_q = state.R.coeffs();
-  cloud_pose.pose.orientation.x = temp_q[0];
-  cloud_pose.pose.orientation.y = temp_q[1];
-  cloud_pose.pose.orientation.z = temp_q[2];
-  cloud_pose.pose.orientation.w = temp_q[3];
-  pub_cloud_world_pose_->publish(cloud_pose);
-}
-
 
 void ROSWrapper::pub_processing_time(double time, 
   double current_time, double mean_time, double std_time)
@@ -934,42 +894,76 @@ void ROSWrapper::set_global_map(const BASIC::CloudPtr& global_map){
 }
 
 
-void ROSWrapper::set_initial_data(BASIC::SE3& init_pose, bool& flg_get_init_guess, bool flg_finish_init)
+void ROSWrapper::set_initial_data(bool& flg_get_init_guess, bool flg_finish_init)
 {
   static auto init_pose_sub =
     this->create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
         "/initialpose", 1,
-        [this, &init_pose, &flg_get_init_guess](
+        [this, &flg_get_init_guess](
           const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg) 
         {
-          V3 init_translation;
-          init_translation << msg->pose.pose.position.x,
-                              msg->pose.pose.position.y,
-                              0.2;
+          const auto &pos = msg->pose.pose.position;
+          const auto &ori = msg->pose.pose.orientation;
 
-          double x = msg->pose.pose.orientation.x;
-          double y = msg->pose.pose.orientation.y;
-          double z = msg->pose.pose.orientation.z;
-          double w = msg->pose.pose.orientation.w;
-
-          Quat init_rotation(w, x, y, z);
-
-          init_pose = BASIC::SE3(SO3(init_rotation.toRotationMatrix()), init_translation);
+          // Full 6-DoF: z is no longer hard-coded and roll/pitch are preserved.
+          V3 init_translation(pos.x, pos.y, pos.z);
+          Quat init_rotation(ori.w, ori.x, ori.y, ori.z);
 
           flg_get_init_guess = true;
+
+          // Feed the backend relocalization pipeline as the highest-priority source.
+          {
+            // Relocalization::set_init_pose() and BnB operate in RADIANS
+            // (lidar_extrinsic is also stored in radians), so keep rpy in radians here.
+            const V3 rpy = EigenMath::RotationMatrix2RPY(init_rotation.toRotationMatrix());  // roll, pitch, yaw
+            Pose manual_pose;  // imu pose, radians, consumed by Relocalization::set_init_pose()
+            manual_pose.x = pos.x;
+            manual_pose.y = pos.y;
+            manual_pose.z = pos.z;
+            manual_pose.roll = rpy(0);
+            manual_pose.pitch = rpy(1);
+            manual_pose.yaw = rpy(2);
+            // Queue only: applying it runs on the relocalization owner thread so it
+            // can never race an in-flight background search (and never blocks here).
+            backend.relocalization->request_manual_pose(manual_pose);
+          }
 
           LOG(INFO) << YELLOW
                   << " ---> GET Initial guess: "
                   << init_translation.transpose()
-                  << " yaw: "
-                  << init_rotation.toRotationMatrix()
-                          .eulerAngles(0, 1, 2)
-                          .transpose()
+                  << " rpy(deg): "
+                  << RAD2DEG(EigenMath::RotationMatrix2RPY(init_rotation.toRotationMatrix())).transpose()
                   << RESET;
         });
 
   if (flg_finish_init) {
     init_pose_sub.reset();
+  }
+}
+
+void ROSWrapper::set_gnss_data()
+{
+  if (!use_gnss_) {
+    LOG(INFO) << YELLOW << " ---> GNSS prior disabled (relocalization.use_gnss = false)." << RESET;
+    return;
+  }
+
+  if (!sub_gnss_) {
+    // The relocalization pipeline is compiled with `gnss_with_direction`, so the
+    // prior must carry an orientation and be expressed in the map frame. That is
+    // nav_msgs/Odometry, not a raw NavSatFix (lat/lon/alt would be fed as metres).
+    sub_gnss_ = this->create_subscription<nav_msgs::msg::Odometry>(
+        gnss_topic_, 10,
+        [](const nav_msgs::msg::Odometry::SharedPtr msg) {
+          const auto &pos = msg->pose.pose.position;
+          const auto &ori = msg->pose.pose.orientation;
+          const double stamp = msg->header.stamp.sec + msg->header.stamp.nanosec * 1.0e-9;
+          std::lock_guard<std::mutex> lock(backend.relocalization->gnss_mutex);
+          backend.relocalization->gnss_pose =
+              GnssPose(stamp, V3D(pos.x, pos.y, pos.z), QD(ori.w, ori.x, ori.y, ori.z));
+        });
+    LOG(INFO) << YELLOW << " ---> GNSS prior enabled, topic: " << gnss_topic_
+              << " (expects nav_msgs/Odometry in the map frame)" << RESET;
   }
 }
 
@@ -1018,6 +1012,52 @@ void ROSWrapper::load_backend_param(Backend &backend)
   this->declare_parameter("official.map_path", "");
   this->declare_parameter("scan_context.lidar_height", 2.0);
   this->declare_parameter("scan_context.sc_dist_thres", 0.5);
+
+  // ---------------------------------------------------------------- relocalization
+  this->declare_parameter("official.system_mode", true);  // false => localization mode
+  this->declare_parameter("relocalization.algorithm_type", std::string("bbs3d"));
+  this->declare_parameter("relocalization.use_gnss", false);
+  this->declare_parameter("relocalization.gnss_topic", std::string("/gnss/odom"));
+  this->declare_parameter("relocalization.voxelmap_auto_build", true);
+
+  // ---- BBS3D (global search, CPU/OpenMP) ----
+  this->declare_parameter("bbs3d.min_level_res", 0.5);
+  this->declare_parameter("bbs3d.max_level", 6);
+  this->declare_parameter("bbs3d.min_rpy", vector<double>{-0.1, -0.1, 0.0});
+  this->declare_parameter("bbs3d.max_rpy", vector<double>{0.1, 0.1, 6.28});
+  this->declare_parameter("bbs3d.score_threshold_percentage", 0.9);
+  this->declare_parameter("bbs3d.num_threads", 6);
+  this->declare_parameter("bbs3d.tar_leaf_size", 0.0);
+  this->declare_parameter("bbs3d.src_leaf_size", 2.0);
+  this->declare_parameter("bbs3d.min_scan_range", 0.0);
+  this->declare_parameter("bbs3d.max_scan_range", 100.0);
+  this->declare_parameter("bbs3d.timeout_msec", 0);
+  this->declare_parameter("bbs3d.use_gicp", false);
+
+  // ---- BnB3D window refinement ----
+  this->declare_parameter("bnb3d.linear_xy_window_size", 8.0);
+  this->declare_parameter("bnb3d.linear_z_window_size", 0.5);
+  this->declare_parameter("bnb3d.angular_search_window", 30.0);  // degree
+  this->declare_parameter("bnb3d.pc_resolutions", vector<double>{0.3, 0.5, 0.8});
+  this->declare_parameter("bnb3d.bnb_depth", 3);
+  this->declare_parameter("bnb3d.min_score", 0.1);
+  this->declare_parameter("bnb3d.enough_score", 0.8);
+  this->declare_parameter("bnb3d.min_xy_resolution", 0.2);
+  this->declare_parameter("bnb3d.min_z_resolution", 0.1);
+  this->declare_parameter("bnb3d.min_angular_resolution", 5.0);  // degree
+  this->declare_parameter("bnb3d.filter_size_scan", 2.0);
+  this->declare_parameter("bnb3d.debug_mode", false);
+
+  // ---- NDT / GICP fine alignment ----
+  this->declare_parameter("ndt.step_size", 0.1);
+  this->declare_parameter("ndt.resolution", 1.0);
+  this->declare_parameter("gicp.use_gicp", true);
+  this->declare_parameter("gicp.filter_range", 80.0);
+  this->declare_parameter("gicp.downsample", 0.2);
+  this->declare_parameter("gicp.search_radius", 0.5);
+  this->declare_parameter("gicp.teps", 1e-3);
+  this->declare_parameter("gicp.feps", 1e-3);
+  this->declare_parameter("gicp.fitness_score", 0.3);
 
   this->get_parameter("backend.keyframe_add_dist_threshold", backend.backend->keyframe_add_dist_threshold);
   this->get_parameter("backend.keyframe_add_angle_threshold", backend.backend->keyframe_add_angle_threshold);
@@ -1084,12 +1124,109 @@ void ROSWrapper::load_backend_param(Backend &backend)
   this->get_parameter("scan_context.lidar_height", backend.relocalization->sc_manager->LIDAR_HEIGHT);
   this->get_parameter("scan_context.sc_dist_thres", backend.relocalization->sc_manager->SC_DIST_THRES);
 
-  backend.init_system_mode();
+  // ---------------------------------------------------------------- relocalization
+  bool system_mode = true;
+  this->get_parameter("official.system_mode", system_mode);
+  this->get_parameter("relocalization.algorithm_type", backend.relocalization->algorithm_type);
+  this->get_parameter("relocalization.use_gnss", use_gnss_);
+  this->get_parameter("relocalization.gnss_topic", gnss_topic_);
+  this->get_parameter("relocalization.voxelmap_auto_build", backend.voxelmap_auto_build);
+  backend.relocalization->gnss_enable = use_gnss_;
+
+  // lidar extrinsic for relocalization: reuse the already-parsed g_lidar_imu (T_imu<-lidar)
+  {
+    const M3D R_lidar_d = g_lidar_imu.R_.matrix().cast<double>();
+    const V3D rpy = EigenMath::RotationMatrix2RPY(R_lidar_d);
+    Pose lidar_extrinsic;
+    lidar_extrinsic.x = g_lidar_imu.t_.x();
+    lidar_extrinsic.y = g_lidar_imu.t_.y();
+    lidar_extrinsic.z = g_lidar_imu.t_.z();
+    lidar_extrinsic.roll = RAD2DEG(rpy.x());
+    lidar_extrinsic.pitch = RAD2DEG(rpy.y());
+    lidar_extrinsic.yaw = RAD2DEG(rpy.z());
+
+    BnbOptions match_option;
+    this->get_parameter("bnb3d.linear_xy_window_size", match_option.linear_xy_window_size);
+    this->get_parameter("bnb3d.linear_z_window_size", match_option.linear_z_window_size);
+    this->get_parameter("bnb3d.angular_search_window", match_option.angular_search_window);
+    this->get_parameter("bnb3d.pc_resolutions", match_option.pc_resolutions);
+    this->get_parameter("bnb3d.bnb_depth", match_option.bnb_depth);
+    this->get_parameter("bnb3d.min_score", match_option.min_score);
+    this->get_parameter("bnb3d.enough_score", match_option.enough_score);
+    this->get_parameter("bnb3d.min_xy_resolution", match_option.min_xy_resolution);
+    this->get_parameter("bnb3d.min_z_resolution", match_option.min_z_resolution);
+    this->get_parameter("bnb3d.min_angular_resolution", match_option.min_angular_resolution);
+    this->get_parameter("bnb3d.filter_size_scan", match_option.filter_size_scan);
+    this->get_parameter("bnb3d.debug_mode", match_option.debug_mode);
+    // bnb3d.h asserts pc_resolutions.size() >= bnb_depth; clamp instead of aborting.
+    if (match_option.pc_resolutions.size() < static_cast<size_t>(match_option.bnb_depth))
+    {
+      LOG(ERROR) << YELLOW << " ---> bnb3d.pc_resolutions.size() ("
+                 << match_option.pc_resolutions.size() << ") < bnb3d.bnb_depth ("
+                 << match_option.bnb_depth << "), clamping bnb_depth." << RESET;
+      match_option.bnb_depth = static_cast<int>(match_option.pc_resolutions.size());
+    }
+    backend.relocalization->set_bnb3d_param(match_option, lidar_extrinsic);
+
+    double ndt_step = 0.1, ndt_res = 1.0;
+    this->get_parameter("ndt.step_size", ndt_step);
+    this->get_parameter("ndt.resolution", ndt_res);
+    backend.relocalization->set_ndt_param(ndt_step, ndt_res);
+
+    bool use_gicp = true;
+    double gicp_filter_range = 80.0, gicp_ds = 0.2, gicp_search = 0.5;
+    double gicp_teps = 1e-3, gicp_feps = 1e-3, gicp_fitness = 0.3;
+    this->get_parameter("gicp.use_gicp", use_gicp);
+    this->get_parameter("gicp.filter_range", gicp_filter_range);
+    this->get_parameter("gicp.downsample", gicp_ds);
+    this->get_parameter("gicp.search_radius", gicp_search);
+    this->get_parameter("gicp.teps", gicp_teps);
+    this->get_parameter("gicp.feps", gicp_feps);
+    this->get_parameter("gicp.fitness_score", gicp_fitness);
+    backend.relocalization->set_gicp_param(use_gicp, gicp_filter_range, gicp_ds, gicp_search,
+                                           gicp_teps, gicp_feps, gicp_fitness);
+  }
+
+  // ---------------------------------------------------------------- 3D-BBS options
+  this->get_parameter("bbs3d.min_level_res", backend.bbs3d_option.min_level_res);
+  this->get_parameter("bbs3d.max_level", backend.bbs3d_option.max_level);
+  this->get_parameter("bbs3d.min_rpy", backend.bbs3d_option.min_rpy);
+  this->get_parameter("bbs3d.max_rpy", backend.bbs3d_option.max_rpy);
+  this->get_parameter("bbs3d.score_threshold_percentage", backend.bbs3d_option.score_threshold_percentage);
+  this->get_parameter("bbs3d.num_threads", backend.bbs3d_option.num_threads);
+  this->get_parameter("bbs3d.tar_leaf_size", backend.bbs3d_option.tar_leaf_size);
+  this->get_parameter("bbs3d.src_leaf_size", backend.bbs3d_option.src_leaf_size);
+  this->get_parameter("bbs3d.min_scan_range", backend.bbs3d_option.min_scan_range);
+  this->get_parameter("bbs3d.max_scan_range", backend.bbs3d_option.max_scan_range);
+  this->get_parameter("bbs3d.timeout_msec", backend.bbs3d_option.timeout_msec);
+  this->get_parameter("bbs3d.use_gicp", backend.bbs3d_option.use_gicp);
+
+  LOG(WARNING) << YELLOW << " ---> Relocalization:"
+            << " algorithm_type=" << backend.relocalization->algorithm_type
+            << " map_path=" << backend.map_path
+            << " use_gnss=" << (use_gnss_ ? 1 : 0)
+            << " voxelmap_auto_build=" << (backend.voxelmap_auto_build ? 1 : 0)
+            << " bbs3d(min_level_res=" << backend.bbs3d_option.min_level_res
+            << ", max_level=" << backend.bbs3d_option.max_level
+            << ", score_thres=" << backend.bbs3d_option.score_threshold_percentage
+            << ", threads=" << backend.bbs3d_option.num_threads
+            << ", scan_range=[" << backend.bbs3d_option.min_scan_range << ", "
+            << backend.bbs3d_option.max_scan_range << "])"
+            << " bnb3d(min_score=" << backend.relocalization->bnb_option.min_score
+            << ", enough_score=" << backend.relocalization->bnb_option.enough_score << ")"
+            << RESET;
+
+  if (system_mode)
+    backend.init_system_mode();
+  else
+    LOG(WARNING) << YELLOW << " ---> Localization mode: init_system_mode() skipped." << RESET;
 
   this->declare_parameter("publish.showOptimizedPose", true);
+  this->declare_parameter("publish.print_pose", false);  // echo world pose to terminal (debug)
   this->declare_parameter("publish.globalMapVisualizationSearchRadius", 1000.);
   this->declare_parameter("publish.globalMapVisualizationPoseDensity", 10.);
   this->declare_parameter("publish.globalMapVisualizationLeafSize", 1.);
+  this->get_parameter("publish.print_pose", print_pose_);
   this->get_parameter("publish.showOptimizedPose", showOptimizedPose);
   this->get_parameter("publish.globalMapVisualizationSearchRadius", globalMapVisualizationSearchRadius);
   this->get_parameter("publish.globalMapVisualizationPoseDensity", globalMapVisualizationPoseDensity);

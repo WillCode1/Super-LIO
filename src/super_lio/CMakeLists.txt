@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.5)
 project(super_lio VERSION 2.0 LANGUAGES CXX C)
 
 set(CMAKE_SUPPRESS_DEVELOPER_WARNINGS 1 CACHE STRING "Suppress developer warnings" FORCE)
@@ -9,6 +9,9 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_BUILD_TYPE "Release")
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -pthread -fexceptions")
 set(CMAKE_C_FLAGS_RELEASE "-O3 -Wall -fPIC")
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--copy-dt-needed-entries")
+
 add_definitions(-DROOT=\"${CMAKE_CURRENT_SOURCE_DIR}/\")
 # set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread -fexceptions -O0 -g -fsanitize=address")
 
@@ -45,7 +48,9 @@ if (BUILD_CUDA)
   find_package(CUDA REQUIRED)
   include_directories(${CUDA_INCLUDE_DIRS})
   link_directories(${CUDA_LIBRARY_DIRS})
-  set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS} -std=c++20)
+
+  set(CUDA_PROPAGATE_HOST_FLAGS ON)
+  set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS} -std=c++20 -Xcompiler -fPIC)
 endif()
 
 find_package(ament_cmake REQUIRED)
@@ -74,7 +79,7 @@ add_library(cpu_bbs3d
 )
 
 if(BUILD_CUDA)
-  cuda_add_library(gpu_bbs3d
+  cuda_add_library(gpu_bbs3d SHARED
     include/backend/global_localization/bbs3d/gpu_bbs3d/bbs3d.cu
     include/backend/global_localization/bbs3d/gpu_bbs3d/calc_score.cu
     include/backend/global_localization/bbs3d/gpu_bbs3d/voxelmaps.cu
@@ -82,18 +87,6 @@ if(BUILD_CUDA)
     include/backend/global_localization/bbs3d/gpu_bbs3d/voxelmaps_io.cu
   )
 endif()
-
-rosidl_generate_interfaces(${PROJECT_NAME}
-  msg/CloudPose.msg
-  msg/CloudPose2.msg
-  DEPENDENCIES std_msgs sensor_msgs geometry_msgs
-)
-
-rosidl_get_typesupport_target(
-  cpp_typesupport_target
-  ${PROJECT_NAME}
-  "rosidl_typesupport_cpp"
-)
 
 include_directories(
   include
@@ -129,12 +122,12 @@ ament_target_dependencies(lio PUBLIC
   pcl_ros
   livox_ros_driver2
   basic
-  rosidl_default_runtime
 )
 
 target_link_libraries(lio PUBLIC
   Eigen3::Eigen
   ${PCL_LIBRARIES}
+  Boost::filesystem
   gtsam
   stdc++fs
   glog
@@ -150,12 +143,14 @@ endif()
 add_executable(super_lio_node src/apps/super_lio_node.cpp)
 target_link_libraries(super_lio_node
   lio
+  Boost::filesystem
   ${cpp_typesupport_target}
 )
 
 add_executable(relocation_node src/apps/relocation_node.cpp)
 target_link_libraries(relocation_node
   lio
+  Boost::filesystem
   ${cpp_typesupport_target}
 )
 

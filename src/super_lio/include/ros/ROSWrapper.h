@@ -27,11 +27,6 @@
 #include <livox_ros_driver2/msg/custom_msg.hpp>
 #include <pcl_conversions/pcl_conversions.h>
 
-/// msgs
-#include "super_lio/msg/cloud_pose.hpp"
-#include "super_lio/msg/cloud_pose2.hpp"
-
-
 #include "lio/params.h"
 #include "basic/alias.h"
 #include "basic/logs.h"
@@ -68,13 +63,7 @@ public:
 
   void pub_odom(const NavState&);
   void pub_cloud_world(const BASIC::CloudPtr& pc, double time);
-  void pub_cloud2planner(const BASIC::CloudPtr& pc, double time);
-  void pub_cloud_world_pose(const BASIC::CloudPtr& pc, 
-                            const NavState& state);
-  void pub_cloud_body_pose(const BASIC::CloudPtr& pc, 
-                           const NavState& state);
-  void pub_cloud_body_pose( const BASIC::VV3& pc_body,
-                            const NavState& state);  
+
   void pub_processing_time(double time, double current_time, double mean_time, double std_time);
 
   void PublishKeyframeTrajectory(rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr &pubPath,
