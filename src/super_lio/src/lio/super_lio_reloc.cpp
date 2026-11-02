@@ -1,6 +1,7 @@
 
 #include "lio/super_lio_reloc.h"
 
+#include <chrono>
 #include <sys/resource.h>
 #include <tbb/parallel_for.h>
 #include <tbb/blocked_range.h>
@@ -13,6 +14,7 @@
 
 
 using namespace BASIC;
+extern Backend backend;
 
 namespace LI2Sup{
 
@@ -70,7 +72,9 @@ void SuperLIOReLoc::init(){
   ivox_.reset(new OctVoxMapType(OctVoxMapType::Options{g_ivox_resolution, g_ivox_capacity}));
   kf_.reset(new ESKF());
   data_wrapper_->setESKF(kf_);
-  
+
+  data_wrapper_->load_backend_param(backend);
+
   scan_undistort_full_.reset(new PointCloudType());
   ds_undistort_.reset(new PointCloudType());
   world_pc_.reset(new PointCloudType());
@@ -87,6 +91,30 @@ void SuperLIOReLoc::init(){
 
   auto start_time = std::chrono::high_resolution_clock::now();
   SuperLIOReLoc::map_init();
+
+  if (!backend.init_localization_mode())
+    LOG(WARNING) << YELLOW << " ---> [Relocalization] prior map not loaded; "
+                 << "relocalization is disabled until a prior map is provided." << RESET;
+  else if (backend.global_map && !backend.global_map->empty())
+  {
+    /// Localization MUST register against the same prior map that was used for
+    /// relocalization (official.map_path / globalmap.pcd). map_init() may have
+    /// injected the legacy frontend map (g_save_map_dir/g_map_name), so replace
+    /// whatever is in ivox_ unconditionally instead of only seeding when empty.
+    ivox_->clear();
+    point_map_->clear();
+    *point_map_ = *backend.global_map;
+    VV3 map_v3;
+    map_v3.reserve(point_map_->size());
+    for (const auto &p : *point_map_)
+      map_v3.emplace_back(p.x, p.y, p.z);
+    ivox_->insert(map_v3, true);
+    data_wrapper_->set_global_map(point_map_);
+    LOG(INFO) << GREEN << " ---> ivox_ seeded from the prior global map: "
+              << point_map_->size() << RESET;
+    ivox_->printInfo();
+  }
+
   auto end_time = std::chrono::high_resolution_clock::now();
   auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
   LOG(INFO) << GREEN << " ---> [SuperLIO]: Map init success. Time: " << duration.count() << " ms." << RESET;
@@ -94,38 +122,80 @@ void SuperLIOReLoc::init(){
   state_fn_ = &SuperLIOReLoc::stateWaitKFInit;
 }
 
+bool SuperLIOReLoc::process(){
+  /// While the background search runs, only poll its result. Skipping sync_measure
+  /// keeps the sensor callback fast; the buffered data is cleared once it succeeds.
+  if (reloc_inflight_)
+  {
+    (this->*state_fn_)();
+    if (reloc_inflight_)
+      return false;
+  }
+  return SuperLIO::process();
+}
+
+
+bool SuperLIOReLoc::RunBackend(){
+  /// Localization mode: skip keyframe insertion, ScanContext and the GTSAM/iSAM2
+  /// factor graph entirely. The base stateProcess() interprets a false return as
+  /// "no backend correction" and calls UpdateMap() for the current scan instead.
+  static bool warned = false;
+  if (!warned)
+  {
+    warned = true;
+    LOG(INFO) << GREEN << " ---> [Relocalization] localization mode: mapping backend "
+              << "(keyframes / factor graph / loop closure) disabled." << RESET;
+  }
+  return false;
+}
+
 
 bool SuperLIOReLoc::map_init(){
   static bool pcd_loaded = false;
   if(pcd_loaded) return true;
-
-  std::string map_name = g_save_map_dir + "/" + g_map_name;
-  if(pcl::io::loadPCDFile<PointType>(map_name, *point_map_) == -1){
-    LOG(ERROR) << RED << " ---> Load map failed. File: " << map_name << RESET;
-    return false;
-  }
-
-  std::vector<int> useless_indices;
-  pcl::removeNaNFromPointCloud(*point_map_, *point_map_, useless_indices);
-
-  VV3 point_map_v3;
-  point_map_v3.reserve(point_map_->size());
-  for(const auto& point: *point_map_){
-    V3 pt(point.x, point.y, point.z);
-    point_map_v3.push_back(pt);
-  }
-
-  ivox_->insert(point_map_v3);
-
-  LOG(INFO) << GREEN << " ---> Load map success. File: " << map_name << RESET;
-  LOG(INFO) << GREEN << " ---> Map size: " << point_map_->size() << RESET;
-  ivox_->printInfo();
-
   pcd_loaded = true;
 
+  std::string map_name = g_save_map_dir + "/" + g_map_name;
+  bool loaded = true;
+
+  /// In localization mode the prior map (official.map_path/globalmap.pcd) is the
+  /// single source of truth. If it exists, do not load the legacy frontend map
+  /// (g_save_map_dir/g_map_name) at all: it would put a different map into ivox_.
+  const bool has_prior_map = !backend.globalmap_path.empty() && fs::exists(backend.globalmap_path);
+  if (has_prior_map)
+  {
+    LOG(INFO) << GREEN << " ---> Using prior map " << backend.globalmap_path
+              << " (legacy frontend map " << map_name << " ignored)." << RESET;
+    loaded = false;
+  }
+  else if(pcl::io::loadPCDFile<PointType>(map_name, *point_map_) == -1){
+    LOG(ERROR) << RED << " ---> Load frontend map failed. File: " << map_name
+               << " (the relocalization prior map will be used for ivox_ if available)" << RESET;
+    loaded = false;
+  } else {
+    std::vector<int> useless_indices;
+    pcl::removeNaNFromPointCloud(*point_map_, *point_map_, useless_indices);
+
+    VV3 point_map_v3;
+    point_map_v3.reserve(point_map_->size());
+    for(const auto& point: *point_map_){
+      V3 pt(point.x, point.y, point.z);
+      point_map_v3.push_back(pt);
+    }
+
+    ivox_->insert(point_map_v3);
+
+    LOG(INFO) << GREEN << " ---> Load map success. File: " << map_name << RESET;
+    LOG(INFO) << GREEN << " ---> Map size: " << point_map_->size() << RESET;
+    ivox_->printInfo();
+  }
+
+  /// Always create the ROS interfaces, otherwise /initialpose and GNSS are dead
+  /// whenever the frontend map happens to be missing.
   data_wrapper_->set_global_map(point_map_);
-  data_wrapper_->set_initial_data(re_init_pose_, flg_get_init_guess_);
-  return true;
+  data_wrapper_->set_initial_data(flg_get_init_guess_);
+  data_wrapper_->set_gnss_data();
+  return loaded;
 }
 
 
@@ -135,6 +205,90 @@ bool SuperLIOReLoc::kf_init(){
   static int init_frame_count = 0;
   static V3 mean_gyro = V3::Zero();
   static V3 mean_acce = V3::Zero();
+
+  /// A previous relocalization is still running in the background. Poll it here;
+  /// never block the sensor callback. The heavy BBS3D/NDT/GICP work lives in the worker.
+  if (reloc_inflight_)
+  {
+    static auto last_heartbeat = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_heartbeat > std::chrono::seconds(5))
+    {
+      last_heartbeat = now;
+      LOG(INFO) << YELLOW << " ---> relocalization still running in background..." << RESET;
+    }
+
+    if (reloc_future_.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready)
+      return false;
+
+    RelocTaskResult result = reloc_future_.get();
+    reloc_inflight_ = false;
+
+    /// /initialpose arrived while the search was running: prefer the manual pose.
+    if (backend.relocalization->apply_pending_manual_pose())
+    {
+      LOG(WARNING) << YELLOW << " ---> Manual pose received during relocalization, "
+                   << "discarding the background result." << RESET;
+      imu_cout = 0;
+      init_frame_count = 0;
+      init_obs_data_->clear();
+      mean_gyro = V3::Zero();
+      mean_acce = V3::Zero();
+      return false;
+    }
+
+    if (!result.ok)
+    {
+      LOG(WARNING) << RED << " ---> Relocalization failed, retrying with the next scan." << RESET;
+      /// Restart the stationary-window estimation as well: the robot may be moving
+      /// now, so keeping the running mean would corrupt the gravity prior.
+      imu_cout = 0;
+      init_frame_count = 0;
+      init_obs_data_->clear();
+      mean_gyro = V3::Zero();
+      mean_acce = V3::Zero();
+      return false;
+    }
+
+    LOG(INFO) << GREEN << " ---> Relocalization success, imu_pose:\n" << result.imu_pose << RESET;
+
+    ESKF::Options options;
+    options.gyro_var_ = g_imu_ng;
+    options.acce_var_ = g_imu_na;
+    options.bias_gyro_var_ = g_imu_nbg;
+    options.bias_acce_var_ = g_imu_nba;
+    options.num_iterations_ = g_kf_max_iterations;
+    options.quit_eps_ = g_kf_quit_eps;
+
+    V3 ref_gravity(0, 0, - g_gravity_norm);
+    float imu_scale = g_gravity_norm / mean_acce.norm();
+    kf_->SetInitialConditions(options, mean_gyro, V3::Zero(), imu_scale, ref_gravity);
+
+    /// Inject the relocalization result as the filter's initial state.
+    auto state = kf_->GetSysState();
+    state.R = SO3(result.imu_pose.block<3, 3>(0, 0).cast<scalar>());
+    state.p = result.imu_pose.block<3, 1>(0, 3).cast<scalar>();
+    state.timestamp = -1.0;
+    kf_->SetX(state);
+    sys_init_pose_ = kf_->GetSE3();
+
+    /// Drop data buffered while the background search was running.
+    data_wrapper_->clear();
+
+    {
+      /// ivox_ already holds the prior map: it must NOT be cleared here.
+      point_map_->clear();
+      point_map_.reset(new PointCloudType());
+      init_obs_data_->clear();
+      init_obs_data_ = nullptr;
+      data_wrapper_->set_initial_data(flg_get_init_guess_, true);
+    }
+
+    return true;
+  }
+
+  /// Apply a manual pose queued by /initialpose before starting a new accumulation.
+  backend.relocalization->apply_pending_manual_pose();
 
   /// get init guess from ROS topic.
   if(flg_get_init_guess_){
@@ -177,8 +331,23 @@ bool SuperLIOReLoc::kf_init(){
     return false;
   }
 
-  LOG(INFO) << YELLOW << " ---> INIT start... obs_data size: " << init_obs_data_->size() << " target size: " << point_map_->size() << RESET;
+  /// Never touch the relocalization backends before the prior map is loaded:
+  /// bnb3d / bbs3d are null otherwise and would crash.
+  if (!backend.relocalization_ready)
+  {
+    static bool warned_not_ready = false;
+    if (!warned_not_ready)
+    {
+      warned_not_ready = true;
+      LOG(ERROR) << RED << " ---> Prior map not loaded, relocalization unavailable. "
+                 << "Check official.map_path / globalmap.pcd." << RESET;
+    }
+    init_frame_count = 0;
+    init_obs_data_->clear();
+    return false;
+  }
 
+  /// Level the body frame with gravity. Yaw stays unknown and is searched over 360 deg.
   V3 gravity = - mean_acce * g_gravity_norm / mean_acce.norm();
   V3 ref_gravity(0, 0, - g_gravity_norm);
   M3 init_rot = Quat::FromTwoVectors(gravity, ref_gravity).toRotationMatrix();
@@ -188,83 +357,51 @@ bool SuperLIOReLoc::kf_init(){
   M3 R_yaw_inv = Eigen::AngleAxis<scalar>(-yaw, V3::UnitZ()).toRotationMatrix(); 
   M3 rot = R_yaw_inv * init_rot;
 
-  M3 init_guess_R_ = re_init_pose_.R_ * rot;
-  V3 init_guess_t_ = re_init_pose_.t_;
-  M4 init_guess_T = M4::Identity();
-  init_guess_T.block<3, 3>(0, 0) = init_guess_R_;
-  init_guess_T.block<3, 1>(0, 3) = init_guess_t_;
-
-
-  pcl::PointCloud<pcl::PointXYZI>::Ptr tmp_src(new pcl::PointCloud<pcl::PointXYZI>());
-  pcl::transformPointCloud(*init_obs_data_, *tmp_src, g_lidar_imu.matrix().cast<float>());
-
-  pcl::NormalDistributionsTransform<pcl::PointXYZI, pcl::PointXYZI> ndt;
-  ndt.setTransformationEpsilon(1e-4);
-  ndt.setEuclideanFitnessEpsilon(1e-4);
-  ndt.setMaximumIterations(25);
-  ndt.setResolution(1.0);
-  ndt.setInputTarget(point_map_);
-
-  pcl::IterativeClosestPoint<pcl::PointXYZI, pcl::PointXYZI> icp;
-  icp.setMaxCorrespondenceDistance(4.0);
-  icp.setMaximumIterations(40);
-  icp.setTransformationEpsilon(1e-4);
-  icp.setEuclideanFitnessEpsilon(1e-4);
-  icp.setRANSACIterations(0);
-  icp.setInputTarget(point_map_);
-
-  ndt.setInputSource(tmp_src);
-  icp.setInputSource(tmp_src);
-
-  pcl::PointCloud<pcl::PointXYZI>::Ptr unused_result(new pcl::PointCloud<pcl::PointXYZI>());
-  ndt.align(*unused_result, init_guess_T.matrix().cast<float>());
-  icp.align(*unused_result, ndt.getFinalTransformation());
-
-  if (icp.hasConverged() == false || icp.getFitnessScore() > 1.5)
-  // if (icp.hasConverged() == false)
+  /// Shrink the BBS3D angular window with the gravity-aligned roll/pitch of the LIDAR frame,
+  /// so only yaw has to be exhausted. reset_rpy() is idempotent (it never mutates the base range).
+  if (backend.relocalization->algorithm_type == "bbs3d")
   {
-    /// reset init state.
-    imu_cout = 0;
-    init_frame_count = 0;
-    init_obs_data_->clear();
-    mean_gyro = V3::Zero();
-    mean_acce = V3::Zero();
-    LOG(INFO) << RED << " ---> Global ICP Converged Fail! FitnessScore: " << icp.getFitnessScore() << RESET;
+    const M3 R_lidar = rot * g_lidar_imu.R_.matrix();
+    const M3D R_lidar_d = R_lidar.cast<double>();
+    const V3D rpy = EigenMath::RotationMatrix2RPY(R_lidar_d);
+    backend.relocalization->bbs3d.reset_rpy(V3D(rpy.x(), rpy.y(), 0.0));
+  }
+
+  /// Launch the heavy part (BBS3D -> BnB/NDT/GICP) on a worker thread. Copy the
+  /// scan so the worker never touches measures_ / init_obs_data_ while the sensor
+  /// callback keeps receiving data.
+  CloudPtr scan_copy(new PointCloudType(*init_obs_data_));
+  const double lidar_time = measures_.lidar.end_time;
+  LOG(INFO) << YELLOW << " ---> RELOC start in background... obs_data size: " << scan_copy->size()
+            << ", prior map size: " << point_map_->size()
+            << ", algorithm_type: " << backend.relocalization->algorithm_type << RESET;
+  try
+  {
+    reloc_future_ = std::async(std::launch::async, [this, scan_copy, lidar_time]() {
+      RelocTaskResult r;
+      try
+      {
+        r.ok = backend.run_relocalization(scan_copy, lidar_time, r.imu_pose);
+      }
+      catch (const std::exception &e)
+      {
+        LOG_ERROR("relocalization worker threw: %s", e.what());
+        r.ok = false;
+      }
+      return r;
+    });
+  }
+  catch (const std::exception &e)
+  {
+    LOG_ERROR("Failed to start relocalization worker: %s", e.what());
     return false;
-  } else{
-    init_guess_T = icp.getFinalTransformation().cast<scalar>();
-    LOG(INFO) << GREEN << " ---> Global ICP Converged Succeed! FitnessScore: " << icp.getFitnessScore() << RESET;
   }
+  reloc_inflight_ = true;
 
-  LOG(INFO) << GREEN << "\n" << init_guess_T << RESET;
-
-  ESKF::Options options;
-  options.gyro_var_ = g_imu_ng;
-  options.acce_var_ = g_imu_na;
-  options.bias_gyro_var_ = g_imu_nbg;
-  options.bias_acce_var_ = g_imu_nba;
-  options.num_iterations_ = g_kf_max_iterations;
-  options.quit_eps_ = g_kf_quit_eps;
-
-  float imu_scale = g_gravity_norm / mean_acce.norm();
-  kf_->SetInitialConditions(options, mean_gyro, V3::Zero(), imu_scale, ref_gravity);
-  auto state = kf_->GetSysState();
-  /// The horizontal initial state of the imu in the robot coordinate system.
-  state.R = SO3(init_guess_T.block<3, 3>(0, 0));
-  state.p = init_guess_T.block<3, 1>(0, 3);
-  state.timestamp = -1.0;
-  kf_->SetX(state);
-  sys_init_pose_ = kf_->GetSE3();
-
-  {
-    point_map_->clear();
-    point_map_.reset(new PointCloudType());
-    init_obs_data_->clear();
-    init_obs_data_ = nullptr;
-    data_wrapper_->set_initial_data(re_init_pose_, flg_get_init_guess_, true);
-  }
-
-  return true;
+  /// Prepare a fresh accumulation window in case this attempt fails.
+  init_frame_count = 0;
+  init_obs_data_->clear();
+  return false;
 }
 
 

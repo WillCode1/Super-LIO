@@ -186,7 +186,7 @@ public:
     sub_inv_resolution_ = 1.0 / sub_resolution_;
   }
 
-  void insert(const Points& cloud_world);
+  void insert(const Points& cloud_world, bool init_map = false);
   void printInfo() const;
   void getMap(std::vector<float>&) const;
   void saveMap() const;    // TODO:
@@ -262,7 +262,7 @@ private:
 
 
 template<typename Point, typename Scalar>
-void OctVoxMap<Point, Scalar>::insert(const Points& cloud_world){
+void OctVoxMap<Point, Scalar>::insert(const Points& cloud_world, bool init_map) {
   if(reset_map_){
     reset_map_count_--;
     if(reset_map_count_ > 0){
@@ -291,7 +291,7 @@ void OctVoxMap<Point, Scalar>::insert(const Points& cloud_world){
         std::forward_as_tuple(pt, local_idx));
       grids_.insert(std::make_pair(key, data_.begin()));
       
-      if (data_.size() >= capacity_) {
+      if (!init_map && data_.size() >= capacity_) {
         grids_.erase(data_.back().first);
         data_.pop_back();
       }
@@ -444,7 +444,7 @@ void OctVoxMap<Point, Scalar>::resetMap(const std::vector<float>& input){
     cloud_world.push_back(point);
   }
 
-  insert(cloud_world);
+  insert(cloud_world, true);
 
   reset_map_ = true;
   reset_map_count_ = 10;

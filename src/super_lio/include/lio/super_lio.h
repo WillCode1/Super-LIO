@@ -33,7 +33,7 @@ public:
     data_wrapper_ = wrapper;
   }
   virtual void init();
-  void process();
+  virtual bool process();
   void saveMap();
   void printTimeRecord();
 
@@ -46,7 +46,7 @@ protected:
   void Propagation_Undistort();
   void DownSample();
   void Observe();
-  bool RunBackend();
+  virtual bool RunBackend();
   virtual void UpdateMap();
   virtual void Output();
   void caceData();

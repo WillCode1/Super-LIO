@@ -18,6 +18,10 @@ public:
 
     void init_system_mode();
 
+    bool init_localization_mode();
+
+    bool build_voxelmaps();
+
     void run(PointXYZIRPYT &this_pose6d, PointCloudType::Ptr &feats_undistort, PointCloudType::Ptr &submap_fix);
 
     void save_globalmap();
@@ -81,4 +85,10 @@ public:
     string trajectory_path = PCD_FILE_DIR("trajectory.pcd");
     string keyframe_path = PCD_FILE_DIR("keyframe/");
     string scd_path = PCD_FILE_DIR("scancontext/");
+
+    /*** relocalization ***/
+    BBS3DOptions bbs3d_option;              // filled by ROSWrapper::load_backend_param()
+    bool voxelmap_auto_build = true;        // build voxelmaps_coords/ on the fly when missing
+    bool relocalization_ready = false;      // true once the prior map / BnB / NDT / GICP are loaded
+    PointCloudType::Ptr global_map;         // prior map loaded by init_localization_mode()
 };

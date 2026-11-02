@@ -21,15 +21,29 @@ void Relocalization::set_extrinsic(const V3D &transl, const M3D &rot)
 bool Relocalization::run_gnss_relocalization(PointCloudType::Ptr scan, Eigen::Matrix4d &rough_mat, const double &lidar_beg_time, const Eigen::Matrix4d &lidar_ext, double &score)
 {
     Timer2 timer;
-    if (std::abs(lidar_beg_time - gnss_pose.timestamp) > 0.5)
+    // Snapshot under the lock: the subscription callback runs in a different
+    // callback group and otherwise races this assignment.
+    GnssPose gnss;
     {
-        LOG_WARN("gnss relocalization failed! time interval = %f.", lidar_beg_time - gnss_pose.timestamp);
+        std::lock_guard<std::mutex> lock(gnss_mutex);
+        gnss = gnss_pose;
+    }
+    // A default-constructed GnssPose has timestamp == 0; without this gate a bag whose
+    // lidar_beg_time starts near 0 would be accepted and yield a bogus zero pose.
+    if (!gnss_enable || gnss.timestamp <= 0.0)
+    {
+        return false;
+    }
+
+    if (std::abs(lidar_beg_time - gnss.timestamp) > 0.5)
+    {
+        LOG_WARN("gnss relocalization failed! time interval = %f.", lidar_beg_time - gnss.timestamp);
         return false;
     }
 
     rough_mat = Eigen::Matrix4d::Identity();
-    rough_mat.topLeftCorner(3, 3) = gnss_pose.gnss_quat.toRotationMatrix();
-    rough_mat.topRightCorner(3, 1) = gnss_pose.gnss_position;
+    rough_mat.topLeftCorner(3, 3) = gnss.gnss_quat.toRotationMatrix();
+    rough_mat.topRightCorner(3, 1) = gnss.gnss_position;
     rough_mat *= extrinsic_imu2gnss;
 
     EigenMath::DecomposeAffineMatrix(rough_mat, rough_pose.x, rough_pose.y, rough_pose.z, rough_pose.roll, rough_pose.pitch, rough_pose.yaw);
@@ -62,6 +76,52 @@ bool Relocalization::run_gnss_relocalization(PointCloudType::Ptr scan, Eigen::Ma
                  rough_pose.x, rough_pose.y, rough_pose.z, RAD2DEG(rough_pose.roll), RAD2DEG(rough_pose.pitch), RAD2DEG(rough_pose.yaw),
                  bnb3d->sort_cnt, timer.elapsedLast());
     }
+    return true;
+}
+
+bool Relocalization::run_bbs3d(PointCloudType::Ptr scan, Eigen::Matrix4d &rough_mat, const Eigen::Matrix4d &lidar_ext, double &score)
+{
+    pcl::PointCloud<pcl::PointXYZ>::Ptr bbs_input(new pcl::PointCloud<pcl::PointXYZ>());
+
+    pcl::PointXYZ tmp;
+    for (auto &point : scan->points)
+    {
+        auto norm = pcl::euclideanDistance(point, pcl::PointXYZ(0, 0, 0));
+        if (norm < bbs3d.min_scan_range || norm > bbs3d.max_scan_range)
+          continue;
+        tmp.x = point.x;
+        tmp.y = point.y;
+        tmp.z = point.z;
+        bbs_input->push_back(tmp);
+    }
+
+    if (bbs_input->empty())
+    {
+        LOG_ERROR("bbs3d input scan is empty (check min/max_scan_range and the input cloud).");
+        return false;
+    }
+
+    if (bbs3d.src_leaf_size != 0.0f)
+    {
+        pcl::VoxelGrid<pcl::PointXYZ> filter;
+        filter.setLeafSize(bbs3d.src_leaf_size, bbs3d.src_leaf_size, bbs3d.src_leaf_size);
+        filter.setInputCloud(bbs_input);
+        filter.filter(*bbs_input);
+    }
+
+    if (!bbs3d.run(bbs_input, rough_mat))
+    {
+        LOG_ERROR("bbs3d failed! Please move the vehicle to another position and try again.");
+        return false;
+    }
+
+    // lidar pose -> imu pose
+    rough_mat *= lidar_ext.inverse();
+
+    EigenMath::DecomposeAffineMatrix(rough_mat, rough_pose.x, rough_pose.y, rough_pose.z, rough_pose.roll, rough_pose.pitch, rough_pose.yaw);
+    LOG_WARN("bbs3d success! res pose = (%.2lf,%.2lf,%.2lf,%.2lf,%.2lf,%.2lf)!",
+             rough_pose.x, rough_pose.y, rough_pose.z, RAD2DEG(rough_pose.roll), RAD2DEG(rough_pose.pitch), RAD2DEG(rough_pose.yaw));
+
     return true;
 }
 
@@ -167,6 +227,16 @@ bool Relocalization::run(const PointCloudType::Ptr &scan, Eigen::Matrix4d &resul
         return true;
     }
 
+    if (algorithm_type.compare("bbs3d") == 0)
+    {
+        if (!run_bbs3d(scan, result, lidar_ext, score) || !fine_tune_pose(scan, result, lidar_ext, score))
+        {
+#ifdef DEDUB_MODE
+            result = EigenMath::CreateAffineMatrix(V3D(rough_pose.x, rough_pose.y, rough_pose.z), V3D(rough_pose.roll, rough_pose.pitch, rough_pose.yaw));
+#endif
+            success_flag = false;
+        }
+    }
     if (algorithm_type.compare("scan_context") == 0)
     {
         if (!run_scan_context(scan, result, lidar_ext, score) || !fine_tune_pose(scan, result, lidar_ext, score))
@@ -335,6 +405,14 @@ void Relocalization::set_init_pose(const Pose &_manual_pose)
     manual_pose.pitch -= lidar_extrinsic.pitch;
     manual_pose.yaw -= lidar_extrinsic.yaw;
 
+    if (!trajectory_poses || trajectory_poses->empty())
+    {
+        // No trajectory to borrow elevation from: widen the z window instead of
+        // feeding an empty cloud to the KD-tree.
+        bnb_option.linear_z_window_size = 6;
+        LOG_ERROR("manual position no elevation found (trajectory is empty)!");
+    }
+    else
     {
         std::vector<int> indices;
         std::vector<float> distances;
@@ -368,6 +446,29 @@ void Relocalization::set_init_pose(const Pose &_manual_pose)
              RAD2DEG(manual_pose.roll), RAD2DEG(manual_pose.pitch), RAD2DEG(manual_pose.yaw));
     LOG_WARN("*******************************************");
     prior_pose_inited = true;
+}
+
+void Relocalization::request_manual_pose(const Pose &_manual_pose)
+{
+    std::lock_guard<std::mutex> lock(manual_pose_mutex);
+    pending_manual_pose = _manual_pose;
+    pending_manual_valid = true;
+    LOG_WARN("manual pose queued; it will be applied between relocalization attempts.");
+}
+
+bool Relocalization::apply_pending_manual_pose()
+{
+    Pose pose;
+    {
+        std::lock_guard<std::mutex> lock(manual_pose_mutex);
+        if (!pending_manual_valid)
+            return false;
+        pose = pending_manual_pose;
+        pending_manual_valid = false;
+    }
+    set_init_pose(pose);
+    algorithm_type = "manually_set";
+    return true;
 }
 
 void Relocalization::set_bnb3d_param(const BnbOptions &match_option, const Pose &lidar_pose)
@@ -443,4 +544,41 @@ void Relocalization::add_keyframe_descriptor(const PointCloudType::Ptr thiskeyfr
 
     if (path.compare("") != 0)
         sc_manager->saveCurrentSCD(path);
+}
+
+void Relocalization::get_pose_score(const Eigen::Matrix4d &imu_pose, const PointCloudType::Ptr &scan, double &bnb_score, double &ndt_score)
+{
+    PointCloudType::Ptr trans_pc(new PointCloudType(scan->points.size(), 1));
+    const Eigen::Matrix4d lidar_pose = imu_pose * lidar_extrinsic.toMatrix4d();
+    pcl::transformPointCloud(*scan, *trans_pc, lidar_pose);
+    bnb_score = bnb3d->calculateOccupancyScore(0, trans_pc);
+
+    // getFitnessScore
+    ndt.setInputSource(trans_pc);
+    if (!ndt.initCompute())
+        return;
+
+    std::vector<int> nn_indices(1);
+    std::vector<float> nn_dists(1);
+
+    // For each point in the source dataset
+    int nr = 0;
+    for (std::size_t i = 0; i < trans_pc->points.size(); ++i)
+    {
+        // Find its nearest neighbor in the target
+        ndt.getSearchMethodTarget()->nearestKSearch(trans_pc->points[i], 1, nn_indices, nn_dists);
+
+        // Deal with occlusions (incomplete targets)
+        if (nn_dists[0] <= std::numeric_limits<double>::max())
+        {
+            // Add to the fitness score
+            ndt_score += nn_dists[0];
+            nr++;
+        }
+    }
+
+    if (nr > 0)
+        ndt_score = ndt_score / nr;
+    else
+        ndt_score = std::numeric_limits<double>::max();
 }

@@ -9,8 +9,15 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     pkg_super_lio = get_package_share_directory('super_lio')
-    config_yaml = os.path.join(pkg_super_lio, 'config', 'livox_360.yaml')
-    rviz_config_file = os.path.join(pkg_super_lio, 'rviz', 'relocation.rviz')
+    relocation_yaml = os.path.join(pkg_super_lio, 'config', 'localization.yaml')
+    rviz_config_file = os.path.join(pkg_super_lio, 'rviz', 'localization.rviz')
+
+    declare_config_arg = DeclareLaunchArgument(
+        'config',
+        default_value='livox_360.yaml',
+        description='Robot config yaml that provides the LIO / sensor / extrinsic block'
+    )
+    config_yaml = PathJoinSubstitution([pkg_super_lio, 'config', LaunchConfiguration('config')])
 
     declare_rviz_arg = DeclareLaunchArgument(
         'rviz',
@@ -24,7 +31,7 @@ def generate_launch_description():
         executable='relocation_node',
         name='relocation_node',
         output='screen',
-        parameters=[config_yaml],
+        parameters=[config_yaml, relocation_yaml],
         arguments=['--ros-args', '--log-level', 'info']
     )
 
@@ -37,6 +44,7 @@ def generate_launch_description():
     )
 
     ld = LaunchDescription()
+    ld.add_action(declare_config_arg)
     ld.add_action(declare_rviz_arg)
     ld.add_action(super_lio_node)
     ld.add_action(rviz2_node)

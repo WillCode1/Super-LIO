@@ -88,7 +88,10 @@ public:
 
   void set_global_map(const BASIC::CloudPtr& global_map);
 
-  void set_initial_data(BASIC::SE3& init_pose, bool& flg_get_init_guess, bool flg_finish_init = false);
+  void set_initial_data(bool& flg_get_init_guess, bool flg_finish_init = false);
+
+  /// Optional GNSS prior feed for relocalization (relocalization.use_gnss).
+  void set_gnss_data();
 
   void load_backend_param(Backend& backend);
 
@@ -109,6 +112,12 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu_;
   rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr sub_lidar_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_lidar_std_;
+  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr sub_gnss_;
+
+  /// relocalization
+  bool use_gnss_ = false;
+  std::string gnss_topic_ = "/gnss/odom";
+  bool print_pose_ = false;   /// publish.print_pose: echo the world pose to the terminal
 
   std::deque<IMUData>   imu_buffer_;
   std::deque<LidarData> lidar_buffer_;
@@ -128,6 +137,7 @@ private:
 /// output.
 private:
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_odom_;       /// lidar fre --> IMU frame
+  rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_lidar_localization_; /// world -> base_link (reference-compatible)
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_imu_odom_;   /// IMU fre   --> IMU frame
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_robo_odom_;  /// IMU fre   --> Robot frame
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_path_;

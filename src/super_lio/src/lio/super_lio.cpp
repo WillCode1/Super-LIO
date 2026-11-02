@@ -107,11 +107,12 @@ void SuperLIO::stateWaitMapInit()
   }
 }
 
-void SuperLIO::process(){
+bool SuperLIO::process(){
   if(!data_wrapper_->sync_measure(measures_)){
-    return;
+    return false;
   }
   (this->*state_fn_)();
+  return true;
 }
 
 
@@ -432,8 +433,15 @@ void SuperLIO::Propagation_Undistort(){
 
 
 void SuperLIO::DownSample(){
-  voxel_grid_fliter_.setInputCloud(scan_undistort_full_);
-  voxel_grid_fliter_.filter(ds_undistort_);
+  if (g_enable_downsample)
+  {
+    voxel_grid_fliter_.setInputCloud(scan_undistort_full_);
+    voxel_grid_fliter_.filter(ds_undistort_);
+  }
+  else
+  {
+    *ds_undistort_ = *scan_undistort_full_;
+  }
 }
 
 

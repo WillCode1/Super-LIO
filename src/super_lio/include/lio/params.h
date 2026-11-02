@@ -48,7 +48,6 @@ namespace LI2Sup{
   extern bool  g_enable_downsample;
   extern float g_voxel_fliter_size;
 
-  extern int    g_imu_type;
   extern double g_gravity_norm;
   extern double g_imu_na;
   extern double g_imu_ng;
@@ -64,26 +63,15 @@ namespace LI2Sup{
   extern float       g_ivox_resolution;
   
   /// kf
-  extern int g_kf_type;            // 1: ESKF, 2: InESKF.
   extern int g_kf_max_iterations;
   extern bool g_kf_align_gravity;
   extern double g_kf_quit_eps;
 
-  /// submaps
-  extern double g_submap_resolution;
-  extern int    g_submap_capacity;
-  
   /// output  
   extern bool g_2_robot;
-  extern bool g_2_plan_env_world;
-  extern bool g_2_plan_env_body;
-  extern bool g_2_ml_map;
   extern bool g_visual_map;
   extern bool g_visual_dense;
   extern int  g_pub_step;
-
-  /// for planner
-  extern bool g_planner_enable;
 
   /// Define the hybrid residual formulation.
   enum ResidualType{
@@ -94,9 +82,8 @@ namespace LI2Sup{
   extern ResidualType g_residual_type;
 
 
-  /// for relocation
+  /// for localization
   extern bool g_update_map;
-  extern double g_init_px, g_init_py, g_init_pz, g_init_roll, g_init_pitch, g_init_yaw;
 
 }
 

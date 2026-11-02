@@ -25,14 +25,19 @@ int main(int argc, char** argv){
   lio->init();
 
   auto timer = data_wrapper->create_wall_timer(
-    std::chrono::milliseconds(2),
-    [lio]() { lio->process(); },
-    data_wrapper->getSensorCallbackGroup()
-  );
+      std::chrono::milliseconds(2),
+      [lio]()
+      {
+        Timer2 timer;
+        if (lio->process())
+        {
+          LOG_INFO("location cost time = %.2lf ms", timer.elapsedLast());
+        }
+      },
+      data_wrapper->getSensorCallbackGroup());
 
   rclcpp::spin(data_wrapper);
 
-  lio->saveMap();
   lio->printTimeRecord();
 
   rclcpp::shutdown();

@@ -79,7 +79,7 @@ Before running relocalization, please make sure that:
 ```bash
 cd PATH_2_Super-LIO
 source install/setup.bash
-ros2 launch super_lio relocation.py
+ros2 launch super_lio localization.py
 ```
 
 
