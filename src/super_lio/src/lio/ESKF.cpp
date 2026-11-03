@@ -174,7 +174,7 @@ bool ESKF::Predict(const IMUData& imu, DynamicState& state_imu, DynamicState& st
   forward_last_imu_ = imu;
 
   new_R.R_ = fw_R_.R_ * g_odom_robo.R_;
-  new_p = fw_R_.R_ * ( - g_odom_robo.R_ * g_odom_robo.t_) + fw_p_;
+  new_p = fw_R_.R_ * g_odom_robo.t_ + fw_p_;
   state_robot.time = imu.secs;
   state_robot.R = new_R.R_;
   state_robot.p = new_p;

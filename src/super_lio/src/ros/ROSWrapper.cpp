@@ -642,12 +642,12 @@ void ROSWrapper::pub_odom(const NavState& state){
   odom.child_frame_id = "imu";
   pub_odom_->publish(odom);    // imu frame -> lidar frequency
 
-  V3 lidar_position = state.R.R_ * ( - g_lidar_imu.R_ * g_lidar_imu.t_) + state.p;
+  V3 lidar_position = state.R.R_ * g_lidar_imu.t_ + state.p;
   M3 lidar_rotation = state.R.R_ * g_lidar_imu.R_;
   Quat lidar_quat(lidar_rotation);
   lidar_quat.normalize();
 
-  V3 robo_position = state.R.R_ * ( - g_odom_robo.R_ * g_odom_robo.t_) + state.p;
+  V3 robo_position = state.R.R_ * g_odom_robo.t_ + state.p;
   M3 robo_rotation = state.R.R_ * g_odom_robo.R_;
   Quat robo_quat(robo_rotation);
   robo_quat.normalize();
