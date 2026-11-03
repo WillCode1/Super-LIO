@@ -43,10 +43,27 @@ def generate_launch_description():
         condition=IfCondition(rviz_flag)
     )
 
+    # static_tf = Node(
+    #     package='tf2_ros',
+    #     executable='static_transform_publisher',
+    #     name='static_tf_publisher',
+    #     arguments=[
+    #         '--x', '0.0',
+    #         '--y', '0.0',
+    #         '--z', '0.0',
+    #         '--roll', '0.0',
+    #         '--pitch', '0.0',
+    #         '--yaw', '0.0',
+    #         '--frame-id', 'base_link',
+    #         '--child-frame-id', 'imu'
+    #     ]
+    # )
+
     ld = LaunchDescription()
     ld.add_action(declare_config_arg)
     ld.add_action(declare_rviz_arg)
     ld.add_action(super_lio_node)
     ld.add_action(rviz2_node)
+    # ld.add_action(static_tf)
 
     return ld

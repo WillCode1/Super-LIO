@@ -716,18 +716,36 @@ void ROSWrapper::pub_odom(const NavState& state){
 
   geometry_msgs::msg::TransformStamped tf_msg;
 
-  tf_msg.header.stamp = odom.header.stamp;
-  tf_msg.header.frame_id = "world";
-  tf_msg.child_frame_id = "imu";
+  if (true)
+  {
+    tf_msg.header.stamp = odom.header.stamp;
+    tf_msg.header.frame_id = "world";
+    tf_msg.child_frame_id = "base_link";
 
-  tf_msg.transform.translation.x = state.p[0];
-  tf_msg.transform.translation.y = state.p[1];
-  tf_msg.transform.translation.z = state.p[2];
+    tf_msg.transform.translation.x = robo_position[0];
+    tf_msg.transform.translation.y = robo_position[1];
+    tf_msg.transform.translation.z = robo_position[2];
 
-  tf_msg.transform.rotation.x = temp_q.x();
-  tf_msg.transform.rotation.y = temp_q.y();
-  tf_msg.transform.rotation.z = temp_q.z();
-  tf_msg.transform.rotation.w = temp_q.w();
+    tf_msg.transform.rotation.x = robo_quat.x();
+    tf_msg.transform.rotation.y = robo_quat.y();
+    tf_msg.transform.rotation.z = robo_quat.z();
+    tf_msg.transform.rotation.w = robo_quat.w();
+  }
+  else
+  {
+    tf_msg.header.stamp = odom.header.stamp;
+    tf_msg.header.frame_id = "world";
+    tf_msg.child_frame_id = "imu";
+
+    tf_msg.transform.translation.x = state.p[0];
+    tf_msg.transform.translation.y = state.p[1];
+    tf_msg.transform.translation.z = state.p[2];
+
+    tf_msg.transform.rotation.x = temp_q.x();
+    tf_msg.transform.rotation.y = temp_q.y();
+    tf_msg.transform.rotation.z = temp_q.z();
+    tf_msg.transform.rotation.w = temp_q.w();
+  }
 
   tf_broadcaster_->sendTransform(tf_msg);
 

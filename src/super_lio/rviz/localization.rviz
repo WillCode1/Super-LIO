@@ -5,6 +5,8 @@ Panels:
     Property Tree Widget:
       Expanded:
         - /Global Options1
+        - /TF1/Tree1/world1
+        - /TF1/Tree1/world1/base_link1
       Splitter Ratio: 0.5
     Tree Height: 727
   - Class: rviz_common/Selection
@@ -52,6 +54,29 @@ Visualization Manager:
       Name: Axes
       Radius: 0.10000000149011612
       Reference Frame: world
+      Value: true
+    - Class: rviz_default_plugins/TF
+      Enabled: true
+      Frame Timeout: 15
+      Frames:
+        All Enabled: true
+        base_link:
+          Value: true
+        imu:
+          Value: true
+        world:
+          Value: true
+      Marker Scale: 1
+      Name: TF
+      Show Arrows: true
+      Show Axes: true
+      Show Names: false
+      Tree:
+        world:
+          base_link:
+            imu:
+              {}
+      Update Interval: 0
       Value: true
     - Alpha: 0.699999988079071
       Autocompute Intensity Bounds: true
@@ -124,8 +149,8 @@ Visualization Manager:
     - Alpha: 0.8999999761581421
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
-        Max Value: 65.98863220214844
-        Min Value: -2.647308111190796
+        Max Value: 81.97885131835938
+        Min Value: -3.5371694564819336
         Value: true
       Axis: Z
       Channel Name: intensity
